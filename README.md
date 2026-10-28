@@ -177,6 +177,24 @@ Guardrails are not set-and-forget. Every saved page policy is versioned
 causes false positives or misses attacks. `rollback` restores a previous
 version as a new version (append-only audit trail).
 
+**Human-in-the-loop escalation:**
+
+```
+python3 guardrail_human_loop.py   # CLI: escalate/decide/stats
+```
+
+When conversation risk reaches medium/high, the content is escalated to a
+human reviewer via webhook or console. The reviewer can approve, block, or
+request a re-scan; the decision is recorded and applied. Configured via env:
+
+```
+HUMAN_LOOP_ENABLED=1
+HUMAN_LOOP_MODE=console        # or "webhook"
+HUMAN_LOOP_WEBHOOK_URL=http://...
+HUMAN_LOOP_ESCALATE_AT=medium
+HUMAN_LOOP_DECISION_TIMEOUT_SEC=60
+```
+
 ## Web config UI
 
 Open `http://localhost:8083/` to edit any page's policy live (patterns, keywords, disclaimers, limits, checks) and test validation in real time. Save writes to `policies/pages/<page>.json`; download JSON for offline deploys.
@@ -202,6 +220,7 @@ python3 tests/test_outer_monitor.py   # outer monitor + bootstrapped monitoring 
 python3 tests/test_cage_breakout.py   # cage breakout-strategy checks (26 strategies)
 python3 tests/test_new_modules.py     # modes, risk, integrity checks
 python3 tests/test_classifier_step.py # classifier, step monitor, rust scanner checks
+python3 tests/test_human_loop.py      # human-in-the-loop escalation checks
 python3 guardrail_testing.py          # adversarial suite: catch rate + FP rate
 ./scripts/setup.sh                # chmod + self-test + usage hints
 ```

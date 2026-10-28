@@ -38,6 +38,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from guardrail import GuardrailEngine, GuardrailPolicy, INNER_MODEL_AWARENESS_NOTE, OUTER_MODEL_AWARENESS_NOTE
 from guardrail_risk import get_tracker
 from guardrail_classifier import GuardrailClassifier, ClassifierConfig
+from guardrail_human_loop import HumanLoopEscalator, HumanLoopConfig
 
 LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 AUDIT_LOG = os.path.join(LOGS_DIR, "outer_monitor_audit.jsonl")
@@ -171,6 +172,25 @@ class OuterMonitor:
             "timeout": int(os.environ.get("CLASSIFIER_TIMEOUT", "20")),
         }))
 
+        # Human-in-the-loop escalation for risky conversations (medium+ risk
+        # routes to a human reviewer via webhook or console). Configured via
+        # env:
+        #   HUMAN_LOOP_ENABLED=1
+        #   HUMAN_LOOP_MODE=console   (or "webhook")
+        #   HUMAN_LOOP_WEBHOOK_URL=http://...
+        #   HUMAN_LOOP_ESCALATE_AT=medium
+        #   HUMAN_LOOP_DECISION_TIMEOUT_SEC=60
+        self.human_loop = HumanLoopEscalator(HumanLoopConfig({
+            "enabled": os.environ.get("HUMAN_LOOP_ENABLED", "0") == "1",
+            "mode": os.environ.get("HUMAN_LOOP_MODE", "console"),
+            "webhook_url": os.environ.get("HUMAN_LOOP_WEBHOOK_URL", ""),
+            "webhook_api_key": os.environ.get("HUMAN_LOOP_WEBHOOK_API_KEY"),
+            "timeout": int(os.environ.get("HUMAN_LOOP_TIMEOUT", "30")),
+            "escalate_at": os.environ.get("HUMAN_LOOP_ESCALATE_AT", "medium"),
+            "decision_timeout_sec": int(
+                os.environ.get("HUMAN_LOOP_DECISION_TIMEOUT_SEC", "60")),
+        }))
+
         # Conversation-level composite risk tracking (multi-turn buildup).
         self.risk_tracker = get_tracker()
 
@@ -185,6 +205,8 @@ class OuterMonitor:
             "trusted_flags": 0,
             "classifier_calls": 0,
             "classifier_blocks": 0,
+            "human_escalations": 0,
+            "human_decisions": 0,
             "by_check": {},
         }
 
@@ -300,6 +322,31 @@ class OuterMonitor:
             risk.record_safe()
             result["risk"] = risk.state()
 
+        # Human-in-the-loop escalation (medium+ risk). Routes risky but not
+        # yet critical conversations to a human reviewer (webhook or console).
+        risk_level = result["risk"]["level"]
+        if (result["safe"] and risk_level in ("medium", "high")
+                and self.human_loop.should_escalate(risk_level)):
+            escalation_id = f"hl-{self.session_id}-{result['risk']['blocked_count']}"
+            decision = self.human_loop.get_decision(escalation_id)
+            if decision == "block":
+                self.qc_stats["human_decisions"] += 1
+                result["safe"] = False
+                result["reason"] = "Human reviewer blocked content"
+                result["blocked_by"] = "human_loop"
+                result["sanitized_input"] = ""
+            elif decision != "rescan":
+                self.human_loop.escalate(
+                    escalation_id, self.session_id, page_id, "input",
+                    user_input, f"risk level {risk_level}", risk_level)
+                self.qc_stats["human_escalations"] += 1
+                result["human_review"] = {
+                    "escalation_id": escalation_id,
+                    "status": "pending",
+                    "reason": f"risk level {risk_level} — awaiting human review",
+                }
+                result["risk"] = risk.state()
+
         self.qc_stats["passed" if result["safe"] else "blocked"] += 1
         result["monitor_session"] = self.session_id
         result["monitored_by_outer"] = True
@@ -412,6 +459,30 @@ class OuterMonitor:
         else:
             risk.record_safe()
             result["risk"] = risk.state()
+
+        # Human-in-the-loop escalation (medium+ risk).
+        risk_level = result["risk"]["level"]
+        if (result["safe"] and risk_level in ("medium", "high")
+                and self.human_loop.should_escalate(risk_level)):
+            escalation_id = f"hl-{self.session_id}-{result['risk']['blocked_count']}"
+            decision = self.human_loop.get_decision(escalation_id)
+            if decision == "block":
+                self.qc_stats["human_decisions"] += 1
+                result["safe"] = False
+                result["reason"] = "Human reviewer blocked content"
+                result["blocked_by"] = "human_loop"
+                result["sanitized_output"] = ""
+            elif decision != "rescan":
+                self.human_loop.escalate(
+                    escalation_id, self.session_id, page_id, "output",
+                    model_output, f"risk level {risk_level}", risk_level)
+                self.qc_stats["human_escalations"] += 1
+                result["human_review"] = {
+                    "escalation_id": escalation_id,
+                    "status": "pending",
+                    "reason": f"risk level {risk_level} — awaiting human review",
+                }
+                result["risk"] = risk.state()
 
         self.qc_stats["passed" if result["safe"] else "blocked"] += 1
         result["monitor_session"] = self.session_id
@@ -728,6 +799,7 @@ class OuterMonitor:
             "outside_model": self.outside_model.to_dict(),
             "trusted_model": self.trusted_model.to_dict(),
             "classifier": self.classifier.config.to_dict(),
+            "human_loop": self.human_loop.config.to_dict(),
             "outer_qc": dict(self.qc_stats),
             "engine": engine_stats,
         }

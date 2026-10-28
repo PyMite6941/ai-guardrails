@@ -35,6 +35,7 @@
     "guardrail_step_monitor.py",
     "guardrail_rust_scanner.py",
     "guardrail_policy_versioning.py",
+    "guardrail_human_loop.py",
     "rust/",
     "scripts/install.sh",
     "scripts/run.sh",
