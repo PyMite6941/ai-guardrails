@@ -46,12 +46,19 @@ cleanup([AUTH_STATE])
 # No password set initially
 check("no password initially", not has_password())
 
-# Set and verify
-set_password("testpass123")
+# Set and verify (strong password: upper + lower + digit + special)
+set_password("TestPass123!")
 check("password set", has_password())
-check("correct password verifies", verify_password("testpass123"))
+check("correct password verifies", verify_password("TestPass123!"))
 check("wrong password fails", not verify_password("wrong"))
 check("empty password fails", not verify_password(""))
+
+# Weak password rejected by complexity rules
+try:
+    set_password("weak")
+    check("weak password rejected", False, "should have raised ValueError")
+except ValueError:
+    check("weak password rejected", True)
 
 cleanup([AUTH_STATE])
 
