@@ -166,6 +166,89 @@ python3 guardrail_server.py   # http://localhost:8083/
 local Rust toolchain (no runtime network required). If the build fails, the
 Python fallback scanner is used automatically.
 
+**Security — authentication, authorization, and hardening:**
+
+The guardrail API server is secured by default when you configure it. Without
+any auth env vars, the server runs in open mode (suitable only for trusted
+local networks). To secure it:
+
+**Password login (web UI):**
+```
+GUARDRAIL_ADMIN_PASSWORD=your_strong_password ./scripts/run.sh
+```
+On first start, the password is hashed with PBKDF2-HMAC-SHA256 (200,000
+iterations, random 16-byte salt) and stored locally at
+`~/.ai_guardrails_auth.json` (mode 0600). The raw password is never written
+to disk. Subsequent starts read the stored hash. Rotate by deleting the file
+and restarting with a new password.
+
+**API keys (programmatic access):**
+```
+GUARDRAIL_API_KEY=your_admin_key   # write/delete/monitor endpoints
+GUARDRAIL_VIEW_KEY=your_view_key   # read-only endpoints
+```
+Generate with: `openssl rand -hex 32`
+
+**IP allowlist:**
+```
+GUARDRAIL_ALLOWED_IPS=10.0.0.0/8,192.168.1.50
+```
+Empty = allow all IPs.
+
+**CORS origin restriction:**
+```
+GUARDRAIL_ALLOWED_ORIGINS=https://your-dashboard.example.com
+```
+Empty = CORS disabled.
+
+**Rate limiting:**
+```
+GUARDRAIL_RATE_LIMIT=60          # requests per minute per key/IP
+GUARDRAIL_MAX_BODY_SIZE=1048576  # max request body bytes (1 MB)
+```
+
+**Host header validation (BadHost protection):**
+```
+GUARDRAIL_ALLOWED_HOSTS=localhost,127.0.0.1,my-pi.local
+```
+Empty = accept any Host header.
+
+**SSRF protection (for external model URLs):**
+```
+GUARDRAIL_SSRF_PROTECTION=1
+```
+Blocks outside model URLs that target private/internal addresses
+(10.x, 172.x, 192.x, link-local, IPv6 private). Disabled by default since
+localhost is the expected default for local model serving.
+
+**Security headers sent on every response:**
+- `X-Content-Type-Options: nosniff`
+- `X-Frame-Options: DENY`
+- `Referrer-Policy: no-referrer`
+- `Content-Security-Policy` (restrictive policy for the web UI)
+
+**Session management:**
+- Session tokens are `secrets.token_urlsafe(32)` and stored in
+  `HttpOnly; SameSite=Strict` cookies.
+- Sessions are regenerated on login (session fixation protection).
+- Sessions expire after `GUARDRAIL_SESSION_TTL` seconds (default 3600).
+
+**Kill switch:**
+- Log injection prevented: the reason string is stripped of newlines before
+  being written to `logs/kill-switch.log`.
+- The log directory is resolved relative to the script location, not
+  hardcoded to a specific user's home directory.
+
+**Endpoint tiers:**
+- `PUBLIC` — GET `/`, `/api/health`, `/api/auth/login`, `/api/auth/logout`,
+  `/api/auth/session`
+- `VIEW` — GET `/api/policies*`, `/api/stats`, `/api/guardrail-status`,
+  `/api/monitor/stats`, `/api/monitor/audit`, `/api/monitor/outer-review`
+  (requires session or view API key)
+- `ADMIN` — PUT/DELETE `/api/policies/*`, POST `/api/validate/*`,
+  `/api/monitor/validate/*`, `/api/monitor/thought|action`
+  (requires session or admin API key)
+
 **Policy versioning with rollback (production best practice):**
 
 ```
@@ -274,6 +357,7 @@ python3 tests/test_classifier_step.py # classifier, step monitor, rust scanner c
 python3 tests/test_human_loop.py      # human-in-the-loop escalation checks
 python3 tests/test_canary.py          # liveness canary checks
 python3 tests/test_hardening.py       # hardware, updates, prompt injection, leakage checks
+python3 tests/test_auth.py            # authentication, authorization, rate limiting
 python3 guardrail_testing.py          # adversarial suite: catch rate + FP rate
 ./scripts/setup.sh                # chmod + self-test + usage hints
 ```

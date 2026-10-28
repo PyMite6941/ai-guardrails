@@ -44,6 +44,9 @@ class ClassifierConfig:
         self.api_key = data.get("api_key")
         self.timeout = int(data.get("timeout", 20))
         self.endpoint = data.get("endpoint", "chat")
+        # SSRF protection: block private/internal addresses
+        from guardrail_auth import validate_model_url
+        validate_model_url(self.base_url, "Classifier base URL")
 
     def to_dict(self) -> Dict[str, Any]:
         return {

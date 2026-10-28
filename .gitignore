@@ -20,6 +20,11 @@ logs/kill-switch.log
 # Personal runtime config (per-host, not committed)
 .ai_guardrails_config.json
 .ai_guardrails_mode.json
+.ai_guardrails_auth.json
+
+# Environment files (template is committed, actual env is not)
+.env
+!.env.example
 
 # Node
 node_modules/

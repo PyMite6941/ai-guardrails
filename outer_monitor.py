@@ -74,6 +74,9 @@ class OutsideModelConfig:
         self.timeout = int(data.get("timeout", 30))
         # endpoint: "generate" (Ollama) or "chat" (OpenAI-compatible)
         self.endpoint = data.get("endpoint", "generate")
+        # SSRF protection: block private/internal addresses
+        from guardrail_auth import validate_model_url
+        validate_model_url(self.base_url, "Outside model base URL")
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -103,6 +106,9 @@ class TrustedModelConfig:
         self.api_key = data.get("api_key")
         self.timeout = int(data.get("timeout", 30))
         self.endpoint = data.get("endpoint", "chat")
+        # SSRF protection: block private/internal addresses
+        from guardrail_auth import validate_model_url
+        validate_model_url(self.base_url, "Trusted model base URL")
 
     def to_dict(self) -> Dict[str, Any]:
         return {

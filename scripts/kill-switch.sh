@@ -9,8 +9,8 @@
 #=============================================================================
 set -u
 
-REASON="${1:-no reason provided}"
-LOG_DIR="${AI_GUARDRAILS_LOG_DIR:-/home/pymite6941/services/local_storage/ai-guardrails/logs}"
+REASON="$(printf '%s' "${1:-no reason provided}" | tr -d '\n\r')"
+LOG_DIR="${AI_GUARDRAILS_LOG_DIR:-$(dirname "${BASH_SOURCE[0]}")/../logs}"
 TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
 HOSTNAME_VAL=$(hostname 2>/dev/null || echo unknown)
 
