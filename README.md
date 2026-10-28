@@ -154,6 +154,29 @@ layer rather than keeping a privileged container alive.
 python3 guardrail_server.py   # http://localhost:8083/
 ```
 
+**Install / run / stop (offline-first):**
+
+```
+./scripts/install.sh   # build Rust pattern scanner (one-time)
+./scripts/run.sh       # start API server in background (http://:8083/)
+./scripts/stop.sh      # stop the server
+```
+
+`install.sh` builds the memory-safe Rust Aho-Corasick scanner using only a
+local Rust toolchain (no runtime network required). If the build fails, the
+Python fallback scanner is used automatically.
+
+**Policy versioning with rollback (production best practice):**
+
+```
+python3 guardrail_policy_versioning.py   # CLI: list/save/load/rollback
+```
+
+Guardrails are not set-and-forget. Every saved page policy is versioned
+(`policies/versions/<page>/v<N>.json`), so you can roll back a policy that
+causes false positives or misses attacks. `rollback` restores a previous
+version as a new version (append-only audit trail).
+
 ## Web config UI
 
 Open `http://localhost:8083/` to edit any page's policy live (patterns, keywords, disclaimers, limits, checks) and test validation in real time. Save writes to `policies/pages/<page>.json`; download JSON for offline deploys.
@@ -178,6 +201,7 @@ python3 tests/test_guardrail.py   # guardrail engine checks (23)
 python3 tests/test_outer_monitor.py   # outer monitor + bootstrapped monitoring checks
 python3 tests/test_cage_breakout.py   # cage breakout-strategy checks (26 strategies)
 python3 tests/test_new_modules.py     # modes, risk, integrity checks
+python3 tests/test_classifier_step.py # classifier, step monitor, rust scanner checks
 python3 guardrail_testing.py          # adversarial suite: catch rate + FP rate
 ./scripts/setup.sh                # chmod + self-test + usage hints
 ```
