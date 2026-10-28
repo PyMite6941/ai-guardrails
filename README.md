@@ -195,6 +195,27 @@ HUMAN_LOOP_ESCALATE_AT=medium
 HUMAN_LOOP_DECISION_TIMEOUT_SEC=60
 ```
 
+**Liveness canary (gate still firing?):**
+
+```
+python3 guardrail_canary.py   # CLI: probe/state/reset/watch
+```
+
+Complements the integrity watcher: the watcher verifies guardrail *contents*
+haven't been tampered with; the canary verifies the guardrail is still
+*firing* correctly by sending synthetic test events (jailbreak, breakout,
+harmful, PII, benign) through the live engine on a schedule. If the gate
+silently stops blocking (or starts false-positive blocking), the canary
+raises an out-of-band alert after a configurable number of consecutive
+failures. This catches the "dead gate" scenario where code is intact but the
+guardrail has been quietly disabled at runtime.
+
+Configured via env:
+```
+CANARY_INTERVAL_SEC=300
+CANARY_ALERT_AFTER_FAILURES=3
+```
+
 ## Web config UI
 
 Open `http://localhost:8083/` to edit any page's policy live (patterns, keywords, disclaimers, limits, checks) and test validation in real time. Save writes to `policies/pages/<page>.json`; download JSON for offline deploys.
@@ -221,6 +242,7 @@ python3 tests/test_cage_breakout.py   # cage breakout-strategy checks (26 strate
 python3 tests/test_new_modules.py     # modes, risk, integrity checks
 python3 tests/test_classifier_step.py # classifier, step monitor, rust scanner checks
 python3 tests/test_human_loop.py      # human-in-the-loop escalation checks
+python3 tests/test_canary.py          # liveness canary checks
 python3 guardrail_testing.py          # adversarial suite: catch rate + FP rate
 ./scripts/setup.sh                # chmod + self-test + usage hints
 ```
