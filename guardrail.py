@@ -46,6 +46,21 @@ def _rust_scan_patterns(patterns: List[str], text: str) -> Optional[Dict[str, An
     except Exception:
         return None
 
+
+# Prompt injection / jailbreak detection (evasion-resistant) and info
+# leakage prevention (canary tokens, secret/exfiltration blocking).
+try:  # noqa: E402
+    from guardrail_prompt_injection import scan_input as _pi_scan, PromptInjectionDetector
+except Exception:  # pragma: no cover - fallback only
+    _pi_scan = None
+    PromptInjectionDetector = None  # type: ignore
+
+try:  # noqa: E402
+    from guardrail_leakage import scan_output as _leak_scan, LeakagePrevention
+except Exception:  # pragma: no cover - fallback only
+    _leak_scan = None
+    LeakagePrevention = None  # type: ignore
+
 # ── Paths ──────────────────────────────────────────────────────────────────
 # Resolve relative to this file so the engine works from any cwd / inside Docker.
 ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -166,6 +181,7 @@ DEFAULT_POLICY: Dict[str, Any] = {
     "checks": [
         "canonicalize",
         "container_breakout",
+        "prompt_injection",
         "input_patterns",
         "input_length",
         "output_patterns",
@@ -175,6 +191,7 @@ DEFAULT_POLICY: Dict[str, Any] = {
         "data_exfiltration",
         "disclaimers",
         "system_prompt_leakage",
+        "leakage",
     ],
 }
 
@@ -283,6 +300,8 @@ class GuardrailEngine:
             "data_exfiltration": self._check_data_exfiltration,
             "disclaimers": self._check_disclaimers,
             "system_prompt_leakage": self._check_system_prompt_leakage,
+            "prompt_injection": self._check_prompt_injection,
+            "leakage": self._check_leakage,
         }
 
         self.qc_stats = {
@@ -514,6 +533,36 @@ class GuardrailEngine:
             if re.search(pattern, text_lower):
                 return False, "", f"Data exfiltration attempt detected: {pattern}"
         return True, text, "Data exfiltration check passed"
+
+    def _check_prompt_injection(self, text: str, policy: GuardrailPolicy) -> Tuple[bool, str, str]:
+        """Evasion-resistant prompt injection / jailbreak detection.
+
+        Strips Unicode smuggling, normalizes (NFKC), decodes Base64/hex/rot13/
+        URL obfuscation layers, then scans for jailbreak keywords, role-play
+        conditioning, multiturn buildup, indirect/RAG-injection markers, and
+        system-prompt leakage. Runs on both input and output.
+        """
+        if _pi_scan is None:
+            return True, text, "Prompt injection detector unavailable"
+        safe, reason, matched = _pi_scan(text)
+        if not safe:
+            return False, "", reason
+        return True, text, "Prompt injection scan passed"
+
+    def _check_leakage(self, text: str, policy: GuardrailPolicy) -> Tuple[bool, str, str]:
+        """Information leakage / data exfiltration prevention.
+
+        Scans output (and input) for canary tokens (internal text leaked),
+        system prompt leakage markers, secrets/credentials, and outbound
+        exfiltration URLs. Fail-closed: anything suspicious is blocked and
+        censored by the engine.
+        """
+        if _leak_scan is None:
+            return True, text, "Leakage detector unavailable"
+        safe, reason, matched = _leak_scan(text)
+        if not safe:
+            return False, "", reason
+        return True, text, "Leakage scan passed"
 
     def _check_container_breakout(self, text: str, policy: GuardrailPolicy) -> Tuple[bool, str, str]:
         """Detect attempts to break out of the container / reach the host.

@@ -216,6 +216,36 @@ CANARY_INTERVAL_SEC=300
 CANARY_ALERT_AFTER_FAILURES=3
 ```
 
+**Hardware optimization (device-aware):**
+
+```
+python3 guardrail_hardware.py   # CLI: prints hardware profile + env overrides
+```
+
+The guardrails adapt to the hardware they run on — no host-specific paths, nothing hardcoded to one machine. `detect_hardware()` reads CPU count, memory, architecture, Raspberry Pi model, and container/virtualization status from `/proc` and `/sys`, then derives recommended settings:
+
+- Raspberry Pi / constrained: fewer parallel checks, Rust scanner preferred, smaller models, lower limits
+- Container: cgroup-aware limits, no host assumptions
+- Desktop/server: full parallelism, verbose logging
+
+Apply with `apply_hardware_to_env()` to get `GUARDRAIL_*` / `OUTSIDE_MODEL_*` / `TRUSTED_MODEL_*` / `CLASSIFIER_MODEL_*` env overrides. Everything is relative to `__file__` or env-configurable — the same package runs on a Pi, desktop, or inside a container.
+
+**Security update tracking:**
+
+```
+python3 guardrail_updates.py   # CLI: refresh/summary/due/applied
+```
+
+Tracks installed component versions (Python, guardrails package, Rust scanner, models) and flags when security updates are due. Works offline — state lives in `logs/updates_state.json`. Set a due date per component, mark updates as applied with the new version, and get a summary of overdue items.
+
+**Prompt injection / jailbreak hardening (`guardrail_prompt_injection.py`):**
+
+Evasion-resistant detection that strips Unicode smuggling, normalizes (NFKC), decodes Base64/hex/rot13/URL layers, then scans for jailbreak keywords, role-play conditioning, multiturn buildup, indirect/RAG-injection markers, system-prompt leakage, and secrets. Fail-closed on unclear input.
+
+**Information leakage prevention (`guardrail_leakage.py`):**
+
+Embeds canary tokens into internal prompts/context so any leakage of internal text is detectable in model output. Scans model output for canary tokens, system-prompt leakage, credentials/secrets, and outbound exfiltration URLs. Uses canary tokens + Unicode stripping + NFKC + casefold (AWS Bedrock guidance). Fail-closed — anything suspicious is blocked and censored.
+
 ## Web config UI
 
 Open `http://localhost:8083/` to edit any page's policy live (patterns, keywords, disclaimers, limits, checks) and test validation in real time. Save writes to `policies/pages/<page>.json`; download JSON for offline deploys.
@@ -243,6 +273,7 @@ python3 tests/test_new_modules.py     # modes, risk, integrity checks
 python3 tests/test_classifier_step.py # classifier, step monitor, rust scanner checks
 python3 tests/test_human_loop.py      # human-in-the-loop escalation checks
 python3 tests/test_canary.py          # liveness canary checks
+python3 tests/test_hardening.py       # hardware, updates, prompt injection, leakage checks
 python3 guardrail_testing.py          # adversarial suite: catch rate + FP rate
 ./scripts/setup.sh                # chmod + self-test + usage hints
 ```
