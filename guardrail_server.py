@@ -24,6 +24,12 @@ from urllib.parse import urlparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from guardrail import GuardrailEngine, GuardrailPolicy, DEFAULT_POLICY, DEFAULT_POLICIES_DIR, DEFAULT_PAGES_DIR
 from outer_monitor import OuterMonitor, OutsideModelConfig
+from guardrail_risk import get_tracker
+from guardrail_integrity import get_watcher
+from guardrail_canary import GuardrailCanary
+from guardrail_classifier import GuardrailClassifier, ClassifierConfig
+from guardrail_human_loop import HumanLoopConfig, HumanLoopEscalator
+from guardrail_modes import load_mode
 
 HOST = os.environ.get("GUARDRAIL_HOST", "0.0.0.0")
 PORT = int(os.environ.get("GUARDRAIL_PORT", "8083"))
@@ -49,6 +55,30 @@ monitor = OuterMonitor(engine=engine,
                        outside_model_config=_outside,
                        watch_inner=True,
                        monitor_outer=True)
+
+# Aggregated status subsystem instances (observability endpoint).
+classifier = GuardrailClassifier(ClassifierConfig({
+    "enabled": os.environ.get("CLASSIFIER_ENABLED", "0") == "1",
+    "base_url": os.environ.get("CLASSIFIER_BASE_URL",
+                               "http://localhost:8000").rstrip("/"),
+    "model": os.environ.get("CLASSIFIER_MODEL", "classifier-model"),
+    "endpoint": os.environ.get("CLASSIFIER_ENDPOINT", "chat"),
+    "timeout": int(os.environ.get("CLASSIFIER_TIMEOUT", "20")),
+}))
+human_loop = HumanLoopEscalator(HumanLoopConfig({
+    "enabled": os.environ.get("HUMAN_LOOP_ENABLED", "0") == "1",
+    "mode": os.environ.get("HUMAN_LOOP_MODE", "console"),
+    "webhook_url": os.environ.get("HUMAN_LOOP_WEBHOOK_URL", ""),
+    "webhook_api_key": os.environ.get("HUMAN_LOOP_WEBHOOK_API_KEY"),
+    "timeout": int(os.environ.get("HUMAN_LOOP_TIMEOUT", "30")),
+    "escalate_at": os.environ.get("HUMAN_LOOP_ESCALATE_AT", "medium"),
+    "decision_timeout_sec": int(
+        os.environ.get("HUMAN_LOOP_DECISION_TIMEOUT_SEC", "60")),
+}))
+canary = GuardrailCanary(engine=engine)
+risk_tracker = get_tracker()
+integrity_watcher = get_watcher()
+current_mode = load_mode()
 
 
 def _json_response(handler, status, payload):
@@ -103,6 +133,39 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/health":
             _json_response(self, 200, {"status": "ok", "engine": "ai-guardrails"})
+            return
+        if path == "/api/guardrail-status":
+            # Consolidated health/status of every guardrail subsystem.
+            risk_states = risk_tracker.all_states()
+            status = {
+                "status": "ok",
+                "engine": "ai-guardrails",
+                "mode": current_mode.value if hasattr(current_mode, "value") else str(current_mode),
+                "engine_stats": engine.get_stats(),
+                "monitor_stats": monitor.get_stats(),
+                "risk": {
+                    "conversations": len(risk_states),
+                    "conversations_at_risk": [
+                        r for r in risk_states
+                        if r["level"] in ("high", "critical")
+                    ],
+                    "all": risk_states,
+                },
+                "integrity": integrity_watcher.check(),
+                "canary": canary.get_state(),
+                "classifier": classifier.get_stats(),
+                "human_loop": human_loop.get_stats(),
+            }
+            # Overall health: degraded if any critical conversation or
+            # integrity findings or canary alerts.
+            degraded = (
+                len(status["risk"]["conversations_at_risk"]) > 0
+                or (isinstance(status["integrity"].get("findings"), list)
+                    and len(status["integrity"]["findings"]) > 0)
+                or status["canary"].get("consecutive_failures", 0) > 0
+            )
+            status["health"] = "degraded" if degraded else "ok"
+            _json_response(self, 200, status)
             return
         # ── Outer monitor endpoints (GET) ─────────────────────────
         if path == "/api/monitor/stats":
