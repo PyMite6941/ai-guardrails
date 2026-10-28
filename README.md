@@ -278,7 +278,109 @@ python3 guardrail_testing.py          # adversarial suite: catch rate + FP rate
 ./scripts/setup.sh                # chmod + self-test + usage hints
 ```
 
-## Publish
+## DevPost submission guide (copy-paste ready)
+
+Below are the common DevPost fields, pre-filled for this project. Copy each block into the corresponding field on DevPost.
+
+**Project Name**
+```
+AI Guardrails
+```
+
+**Tagline (one sentence)**
+```
+Containerized per-web-page input/output guardrails with outer-monitor oversight, container breakout detection, and ephemeral per-conversation cages — offline-first and Raspberry Pi ready.
+```
+
+**Description / What it does**
+```
+AI Guardrails is a Clyde-inspired, executable-code guardrail system for LLM applications. It sits between the user and an AI model (inner AI) and validates every input/output before it reaches the model or the user, with an optional outer oversight model that reviews the inner AI's thoughts and actions.
+
+Key capabilities:
+- Input guardrail: canonicalizes (zero-width/homoglyph + NFKC), blocks jailbreak/container-escape/network patterns and keywords, enforces max length.
+- Output guardrail: blocks harmful content, PII/credentials, data exfiltration, system-prompt leakage; injects financial/legal/security/geopolitics disclaimers; truncates oversized output; censors anything suspicious so nothing reaches the user.
+- Container breakout detection: flags docker.sock, /proc, /sys, cgroup/release_agent, namespaces, ptrace, cloud metadata (169.254.169.254), kubelet/etcd, runc/containerd, D-Bus/systemd, persistence-outside-shell; every attempt is labeled CONTAINER BREAKOUT ATTEMPT and censored.
+- Outer monitor (watcher for the watcher): an outside model reviews the inner AI's thoughts/actions; a trusted third model audits the outer monitor's reasoning for collusion (bootstrapped monitoring, three-level trust chain).
+- Mutual awareness: both models know they are being watched, which improves policy adherence.
+- Ephemeral "cage": run_cage.sh launches the AI inside a hardened Docker container (--rm --read-only --cap-drop ALL --no-new-privs --network none, CPU/mem/pid limits) and destroys it after each conversation — no malware or persistence survives.
+- Modes: TRAINING (record, never block), TESTING (enforce + metrics), RUNNING (full enforcement).
+- Composite conversation-level risk scoring (0.0–1.0) for multi-turn buildup attacks; critical risk blocks all output.
+- Tamper-evident integrity watcher (signed HMAC + hash-chained ledger) detects guardrail file tampering.
+- Liveness canary probes the live guardrail with synthetic tests and alerts if the gate silently stops firing.
+- Policy versioning with rollback; human-in-the-loop escalation; LLM-based classifier second opinion; streaming step-level reasoning monitor with interrupt; memory-safe Rust Aho-Corasick pattern scanner; hardware-aware optimization; security update tracking.
+- Offline-first: install.sh/build works with a local Rust toolchain; no runtime network required; Python fallback scanner included.
+```
+
+**How we built it**
+```
+- Python 3 stdlib-only guardrail engine (guardrail.py) with per-page JSON policies, pluggable checks, kill switch, stats, and JSONL audit logging.
+- HTTP API server (guardrail_server.py) with /api/validate/* and /api/monitor/* endpoints plus a /api/guardrail-status consolidated health endpoint.
+- Node.js client embed (@pymite6941/ai-guardrails on npm) with standalone fallback rules.
+- Web config UI (web/index.html + web/config.js) for live policy editing and testing.
+- Rust Aho-Corasick pattern scanner (rust/src/main.rs) for memory-safe, ReDoS-proof hot-path matching with Python fallback.
+- Docker: containerized model server (docker/model_server.py), hardened compose stack (inner model :8000 + outside monitor :8001), ephemeral cage runner (docker/run_cage.sh).
+- Additional modules: guardrail_modes.py, guardrail_risk.py, guardrail_integrity.py, guardrail_testing.py, guardrail_classifier.py, guardrail_step_monitor.py, guardrail_policy_versioning.py, guardrail_human_loop.py, guardrail_canary.py, guardrail_prompt_injection.py, guardrail_leakage.py, guardrail_hardware.py, guardrail_updates.py.
+- 8 test suites (guardrail engine, outer monitor, cage breakout, modes/risk/integrity, classifier/step/scanner, human loop, canary, hardening) plus an adversarial suite: 100% catch rate, 0% false positives.
+- Dev environment: Raspberry Pi (aarch64), offline-first, no runtime network dependency.
+```
+
+**Challenges we ran into**
+```
+- Making guardrails evasion-resistant: character injection, Unicode smuggling, Base64/hex/rot13, and multilingual jailbreak phrases bypass naive regex. Solved with normalization layers and obfuscation decoding before pattern matching.
+- Avoiding false positives on benign long inputs: tuned the generic high-entropy token pattern to require mixed letter+digit variety.
+- Keeping the AI off the host hardware: used ephemeral, hardened Docker containers (--rm --read-only --cap-drop ALL --no-new-privs --network none) that are destroyed after each conversation.
+- Watcher-for-the-watcher problem: an outer monitor can itself be subverted, so we added a trusted third model to audit the outer monitor's reasoning (bootstrapped monitoring).
+- Detecting a silently-disabled guardrail: added a liveness canary that probes the live engine with synthetic tests and alerts on consecutive failures.
+- Offline-first operation on Raspberry Pi: install.sh builds the Rust scanner from a local toolchain; everything falls back to Python stdlib.
+```
+
+**What's next**
+```
+- LLM-based classifier second opinion (wired in, disabled by default; enable with CLASSIFIER_ENABLED=1).
+- Streaming reasoning-step monitor with interrupt on unsafe step.
+- Additional per-page policies and model integrations.
+- Packaging as a pip-installable Python package alongside the npm package.
+```
+
+**Built with**
+```
+Python 3 (stdlib only), Rust (Aho-Corasick scanner), Docker, Node.js (npm client), tmux, shell scripts
+```
+
+**Installation**
+```
+git clone https://github.com/pymite6941/ai-guardrails.git
+cd ai-guardrails
+./scripts/install.sh   # build Rust scanner (optional; Python fallback included)
+./scripts/run.sh       # start API server on http://localhost:8083/
+./scripts/stop.sh      # stop the server
+```
+
+**Usage**
+```
+# Single-turn cage (AI runs in a destroyed-after-use container):
+./docker/run_cage.sh "your prompt"
+
+# Long-running stack:
+docker compose -f docker/docker-compose.yml up -d
+
+# Enable outside-model monitoring:
+OUTSIDE_MODEL_ENABLED=1 OUTSIDE_MODEL_BASE_URL=http://outside-model:8000 ./scripts/run.sh
+
+# Enable hardware-optimized settings:
+python3 guardrail_hardware.py   # prints env overrides for your device
+```
+
+**Demo / Links**
+- GitHub: https://github.com/pymite6941/ai-guardrails
+- Live API (when running): http://localhost:8083/
+- Web config UI: http://localhost:8083/
+- Inner model container: http://localhost:8000/
+- Outside model (monitor) container: http://localhost:8001/
+
+**License**
+MIT
+
 
 Git tag `v*` → GitHub Actions (`.github/workflows/publish.yml`) publishes to npm.
 
