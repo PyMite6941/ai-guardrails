@@ -17,7 +17,7 @@ import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-HOST = os.environ.get("MODEL_HOST", "0.0.0.0")
+HOST = os.environ.get("MODEL_HOST", "127.0.0.1")
 PORT = int(os.environ.get("MODEL_PORT", "8000"))
 MODE = os.environ.get("MODE_SERVER_MODE", "local").lower()
 MODEL_NAME = os.environ.get("MODEL_NAME", "container-model")

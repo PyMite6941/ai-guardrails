@@ -1,8 +1,10 @@
 # AI Guardrails — Docker Compose
 # Run:  docker compose up -d
-# Web UI / guardrail API:  http://localhost:8083/
-# Inner model (containerized):  http://localhost:8000/
-# Outside model (monitor):        http://localhost:8001/
+# Guardrail API / web UI:   http://localhost:8083/
+# Inner model (containered): reachable via Docker network at ai-model:8000
+#                             (port NOT published to host — internal only)
+# Outside model (monitor):   reachable via Docker network at outside-model:8000
+#                             (port NOT published to host — internal only)
 #
 # The guardrails sit between the user and the inner model, validating every
 # input/output. An outside model (outside-model service) can be enabled to
@@ -18,7 +20,7 @@ services:
     ports:
       - "8083:8083"
     environment:
-      - GUARDRAIL_HOST=0.0.0.0
+      - GUARDRAIL_HOST=127.0.0.1
       - GUARDRAIL_PORT=8083
       - AI_GUARDRAILS_LOG_DIR=/app/logs
       # Outside model monitoring (off by default; enable to watch the inner AI)
@@ -37,13 +39,14 @@ services:
 
   # Model placed inside a Docker container, launched inside a machine.
   # This is the inner AI model the guardrails protect.
+  # Bound to 0.0.0.0 inside the container so it accepts Docker-network
+  # connections from ai-guardrails, but its port is NOT published to the
+  # host — only reachable via the internal Docker network.
   ai-model:
     build:
       context: ./docker
       dockerfile: Dockerfile.model
     container_name: ai-model
-    ports:
-      - "8000:8000"
     environment:
       - MODEL_HOST=0.0.0.0
       - MODEL_PORT=8000
@@ -66,13 +69,13 @@ services:
 
   # Outside model connected to monitor the thoughts and actions of the inner AI.
   # Both models are told they are being watched (mutual awareness + meta-monitoring).
+  # Bound to 0.0.0.0 inside the container so it accepts Docker-network
+  # connections, but its port is NOT published to the host.
   outside-model:
     build:
       context: ./docker
       dockerfile: Dockerfile.model
     container_name: outside-model
-    ports:
-      - "8001:8000"
     environment:
       - MODEL_HOST=0.0.0.0
       - MODEL_PORT=8000

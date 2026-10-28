@@ -62,13 +62,53 @@ ALLOWED_IPS = _env_list("GUARDRAIL_ALLOWED_IPS")
 ALLOWED_ORIGINS = _env_list("GUARDRAIL_ALLOWED_ORIGINS")
 RATE_LIMIT = int(os.environ.get("GUARDRAIL_RATE_LIMIT", "60"))
 MAX_BODY_SIZE = int(os.environ.get("GUARDRAIL_MAX_BODY_SIZE", "1048576"))
-BIND_HOST = os.environ.get("GUARDRAIL_BIND_HOST", "0.0.0.0")
+BIND_HOST = os.environ.get("GUARDRAIL_BIND_HOST", "127.0.0.1")
+
+# Login-specific rate limiting (stricter than general API rate limit).
+LOGIN_RATE_LIMIT = int(os.environ.get("GUARDRAIL_LOGIN_RATE_LIMIT", "5"))
+LOGIN_LOCKOUT_SECONDS = int(os.environ.get("GUARDRAIL_LOGIN_LOCKOUT_SECONDS", "300"))
+LOGIN_MAX_ATTEMPTS = int(os.environ.get("GUARDRAIL_LOGIN_MAX_ATTEMPTS", "5"))
+
+# Password complexity requirements.
+PASSWORD_MIN_LENGTH = int(os.environ.get("GUARDRAIL_PASSWORD_MIN_LENGTH", "8"))
+PASSWORD_REQUIRE_UPPER = os.environ.get("GUARDRAIL_PASSWORD_REQUIRE_UPPER", "true").lower() == "true"
+PASSWORD_REQUIRE_LOWER = os.environ.get("GUARDRAIL_PASSWORD_REQUIRE_LOWER", "true").lower() == "true"
+PASSWORD_REQUIRE_DIGIT = os.environ.get("GUARDRAIL_PASSWORD_REQUIRE_DIGIT", "true").lower() == "true"
+PASSWORD_REQUIRE_SPECIAL = os.environ.get("GUARDRAIL_PASSWORD_REQUIRE_SPECIAL", "true").lower() == "true"
+
+# Session IP binding (prevent session hijacking).
+SESSION_BIND_IP = os.environ.get("GUARDRAIL_SESSION_BIND_IP", "true").lower() == "true"
+
+# ── Rate limiters (token bucket per key-or-IP) ─────────────────────────────
+
+# Login attempt tracking for account lockout.
+_login_attempts: Dict[str, List[float]] = defaultdict(list)
+_login_lockouts: Dict[str, float] = {}
+
+
+def _record_login_attempt(ident: str, success: bool) -> None:
+    """Record a login attempt for lockout tracking."""
+    now = time.time()
+    attempts = _login_attempts[ident]
+    # Remove attempts older than the lockout window
+    attempts[:] = [t for t in attempts if now - t < LOGIN_LOCKOUT_SECONDS]
+    attempts.append(now)
+    if len(attempts) >= LOGIN_MAX_ATTEMPTS:
+        _login_lockouts[ident] = now + LOGIN_LOCKOUT_SECONDS
+
+
+def _clear_login_attempts(ident: str) -> None:
+    """Clear login attempt records on successful login."""
+    _login_attempts.pop(ident, None)
+    _login_lockouts.pop(ident, None)
+
+# Allowed Host header values (prevents BadHost / host header injection attacks).
+
 
 # Allowed Host header values (prevents BadHost / host header injection attacks).
 # Empty = accept any Host. Comma-separated list of hostnames or host:port.
 # Example: GUARDRAIL_ALLOWED_HOSTS=localhost,127.0.0.1,my-pi.local
 ALLOWED_HOSTS = _env_list("GUARDRAIL_ALLOWED_HOSTS")
-
 
 def _host_allowed(host: str) -> bool:
     """Validate the Host header against the allowed list."""
@@ -200,7 +240,11 @@ def _save_auth_state(state: Dict[str, Any]) -> None:
 
 
 def set_password(password: str) -> Dict[str, Any]:
-    """Set the web UI login password (stored as PBKDF2 hash locally)."""
+    """Set the web UI login password (stored as PBKDF2 hash locally).
+
+    Enforces password complexity requirements if configured.
+    """
+    _validate_password_complexity(password)
     salt_hex, hash_hex = _hash_password(password)
     state = _load_auth_state()
     state["password_hash"] = hash_hex
@@ -208,6 +252,26 @@ def set_password(password: str) -> Dict[str, Any]:
     state["created_at"] = datetime.now(timezone.utc).isoformat()
     _save_auth_state(state)
     return {"ok": True, "message": "password set (stored locally as hash)"}
+
+
+def _validate_password_complexity(password: str) -> None:
+    """Validate password meets complexity requirements.
+
+    Raises ValueError if the password doesn't meet requirements.
+    """
+    errors = []
+    if len(password) < PASSWORD_MIN_LENGTH:
+        errors.append(f"password must be at least {PASSWORD_MIN_LENGTH} characters")
+    if PASSWORD_REQUIRE_UPPER and not any(c.isupper() for c in password):
+        errors.append("password must contain at least one uppercase letter")
+    if PASSWORD_REQUIRE_LOWER and not any(c.islower() for c in password):
+        errors.append("password must contain at least one lowercase letter")
+    if PASSWORD_REQUIRE_DIGIT and not any(c.isdigit() for c in password):
+        errors.append("password must contain at least one digit")
+    if PASSWORD_REQUIRE_SPECIAL and not any(c for c in password if not c.isalnum()):
+        errors.append("password must contain at least one special character")
+    if errors:
+        raise ValueError("; ".join(errors))
 
 
 def verify_password(password: str) -> bool:
@@ -246,8 +310,12 @@ def create_session(ip: str, user_agent: str = "") -> str:
     return token
 
 
-def validate_session(token: str) -> Optional[Dict[str, Any]]:
-    """Validate a session token. Returns session dict or None if invalid."""
+def validate_session(token: str, client_ip: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Validate a session token. Returns session dict or None if invalid.
+
+    If client_ip is provided and SESSION_BIND_IP is enabled, verifies the
+    request IP matches the session's original IP (session hijacking protection).
+    """
     if not token:
         return None
     session = _SESSIONS.get(token)
@@ -256,11 +324,25 @@ def validate_session(token: str) -> Optional[Dict[str, Any]]:
     if time.time() > session["expires_at"]:
         _SESSIONS.pop(token, None)
         return None
+    # Session IP binding: ensure request comes from same IP that created session.
+    if SESSION_BIND_IP and client_ip is not None:
+        if session.get("ip") != client_ip:
+            _SESSIONS.pop(token, None)
+            return None
     return session
 
 
 def destroy_session(token: str) -> None:
     _SESSIONS.pop(token, None)
+
+def _log_auth_event(event: str, ip: str, agent: str = "", detail: str = "") -> None:
+    """Log authentication events for audit trail."""
+    try:
+        from guardrail_logging import get_logger
+        logger = get_logger("auth")
+        logger.info("auth_event", event=event, ip=ip, agent=agent, detail=detail)
+    except Exception:
+        pass  # Never let logging break the application
 
 
 def cleanup_sessions() -> int:
@@ -300,6 +382,7 @@ class RateLimiter:
 
 
 _rate_limiter = RateLimiter(RATE_LIMIT)
+_login_rate_limiter = RateLimiter(LOGIN_RATE_LIMIT)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -403,6 +486,28 @@ def authenticate(handler, tier: str) -> AuthResult:
 
     if not _ip_allowed(_client_ip(handler)):
         return AuthResult(False, 403, "ip not allowed")
+
+    # ── Login rate limiting and account lockout ──
+    # Apply stricter rate limiting to login endpoint.
+    path = handler.path
+    command = handler.command
+    if path == "/api/auth/login" and command == "POST":
+        login_ident = f"login:{_client_ip(handler)}"
+        # Check if IP is locked out
+        lockout_until = _login_lockouts.get(login_ident, 0)
+        if lockout_until > time.time():
+            remaining = int(lockout_until - time.time())
+            return AuthResult(False, 429,
+                              f"account locked due to failed login attempts. "
+                              f"Try again in {remaining} seconds.",
+                              {"Retry-After": str(remaining)})
+        # Check rate limit
+        if not _login_rate_limiter.allow(login_ident):
+            # Record failed attempt for lockout tracking
+            _record_login_attempt(login_ident, success=False)
+            return AuthResult(False, 429,
+                              "login rate limit exceeded. Try again later.",
+                              {"Retry-After": "60"})
 
     # ── Host header validation (BadHost / host header injection) ──
     host = handler.headers.get("Host", "")

@@ -49,6 +49,7 @@ from guardrail_auth import (
     verify_password, has_password, set_password, is_auth_configured,
     ADMIN_API_KEY, VIEW_API_KEY, ALLOWED_IPS, ALLOWED_ORIGINS,
     RATE_LIMIT, MAX_BODY_SIZE, BIND_HOST,
+    _log_auth_event,
 )
 
 HOST = os.environ.get("GUARDRAIL_HOST", BIND_HOST)
@@ -342,6 +343,12 @@ class Handler(BaseHTTPRequestHandler):
                                cors_headers)
                 return
             if verify_password(password):
+                # Clear login attempts on successful login
+                login_ident = f"login:{self.client_address[0] if self.client_address else 'unknown'}"
+                _clear_login_attempts(login_ident)
+                # Log successful login
+                _log_auth_event("login_success", self.client_address[0] if self.client_address else "unknown",
+                               self.headers.get("User-Agent", ""))
                 # Session regeneration: destroy any existing session first
                 # to prevent session fixation attacks.
                 old_token = self.headers.get("X-Session-Token", "") or \
@@ -357,6 +364,12 @@ class Handler(BaseHTTPRequestHandler):
                     "session_token": session_token,
                 }, cors_headers, session_token=session_token)
             else:
+                # Record failed login attempt
+                login_ident = f"login:{self.client_address[0] if self.client_address else 'unknown'}"
+                _record_login_attempt(login_ident, success=False)
+                # Log failed login
+                _log_auth_event("login_failure", self.client_address[0] if self.client_address else "unknown",
+                               self.headers.get("User-Agent", ""), "invalid password")
                 _json_response(self, 401, {"error": "invalid password"},
                                cors_headers)
             return
@@ -365,6 +378,8 @@ class Handler(BaseHTTPRequestHandler):
             session_token = self.headers.get("X-Session-Token", "") or \
                 self.headers.get("Cookie", "").replace("session=", "", 1)
             destroy_session(session_token)
+            _log_auth_event("logout", self.client_address[0] if self.client_address else "unknown",
+                           self.headers.get("User-Agent", ""))
             _json_response(self, 200, {"ok": True,
                                        "message": "logged out"},
                            cors_headers)
