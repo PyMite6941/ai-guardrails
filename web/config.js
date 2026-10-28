@@ -6,9 +6,9 @@
 
 const BASE = location.origin;
 const CHECKS = [
-  "canonicalize","input_patterns","input_length","output_patterns",
-  "output_length","harmful_content","pii_credentials","data_exfiltration",
-  "disclaimers","system_prompt_leakage",
+  "canonicalize","container_breakout","input_patterns","input_length",
+  "output_patterns","output_length","harmful_content","pii_credentials",
+  "data_exfiltration","disclaimers","system_prompt_leakage",
 ];
 const DISCLAIMER_TOPICS = ["financial","legal","security","geopolitics"];
 

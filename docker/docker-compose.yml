@@ -1,0 +1,102 @@
+# AI Guardrails — Docker Compose
+# Run:  docker compose up -d
+# Web UI / guardrail API:  http://localhost:8083/
+# Inner model (containerized):  http://localhost:8000/
+# Outside model (monitor):        http://localhost:8001/
+#
+# The guardrails sit between the user and the inner model, validating every
+# input/output. An outside model (outside-model service) can be enabled to
+# monitor the inner AI's thoughts and actions:
+#   OUTSIDE_MODEL_ENABLED=1
+#   OUTSIDE_MODEL_BASE_URL=http://outside-model:8000
+services:
+  ai-guardrails:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: ai-guardrails
+    ports:
+      - "8083:8083"
+    environment:
+      - GUARDRAIL_HOST=0.0.0.0
+      - GUARDRAIL_PORT=8083
+      - AI_GUARDRAILS_LOG_DIR=/app/logs
+      # Outside model monitoring (off by default; enable to watch the inner AI)
+      - OUTSIDE_MODEL_ENABLED=0
+      - OUTSIDE_MODEL_BASE_URL=http://outside-model:8000
+      - OUTSIDE_MODEL_MODEL=container-model
+      - OUTSIDE_MODEL_ENDPOINT=chat
+      - OUTSIDE_MODEL_TIMEOUT=30
+    volumes:
+      - guardrails-logs:/app/logs
+      - guardrails-policies:/app/policies
+    restart: unless-stopped
+    depends_on:
+      - ai-model
+      - outside-model
+
+  # Model placed inside a Docker container, launched inside a machine.
+  # This is the inner AI model the guardrails protect.
+  ai-model:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile.model
+    container_name: ai-model
+    ports:
+      - "8000:8000"
+    environment:
+      - MODEL_HOST=0.0.0.0
+      - MODEL_PORT=8000
+      - MODE_SERVER_MODE=local
+      - MODEL_NAME=inner-model
+    # Cage hardening: the AI never touches the host.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    pids_limit: 64
+    mem_limit: 512m
+    cpus: "0.5"
+    networks:
+      - guardrails-net
+    restart: unless-stopped
+
+  # Outside model connected to monitor the thoughts and actions of the inner AI.
+  # Both models are told they are being watched (mutual awareness + meta-monitoring).
+  outside-model:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile.model
+    container_name: outside-model
+    ports:
+      - "8001:8000"
+    environment:
+      - MODEL_HOST=0.0.0.0
+      - MODEL_PORT=8000
+      - MODE_SERVER_MODE=local
+      - MODEL_NAME=outside-monitor-model
+    # Same cage hardening for the outer monitor model.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    pids_limit: 64
+    mem_limit: 512m
+    cpus: "0.5"
+    networks:
+      - guardrails-net
+    restart: unless-stopped
+
+networks:
+  guardrails-net:
+    driver: bridge
+
+volumes:
+  guardrails-logs:
+  guardrails-policies:

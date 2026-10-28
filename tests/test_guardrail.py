@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from guardrail import GuardrailEngine, validate_input, validate_output, PERSONAL_CONFIG_PATH
 
 failures = []
+checks_run = 0
 
 def reset_config():
     """Personal config persists to disk; reset it so each engine starts clean."""
@@ -20,6 +21,8 @@ def reset_config():
 reset_config()
 
 def check(name, condition, detail=""):
+    global checks_run
+    checks_run += 1
     if not condition:
         failures.append((name, detail))
         print(f"FAIL: {name} {detail}")
@@ -39,6 +42,11 @@ check("jailbreak input blocked", r["safe"] is False and r["blocked_by"] == "inpu
 # 3. Container escape input blocked
 r = engine.validate_input("sudo rm -rf / via docker.sock", page_id="example.com")
 check("container escape blocked", r["safe"] is False, r["reason"])
+
+# 3b. Container breakout explicitly flagged + censored
+r = engine.validate_input("break out of container via docker.sock", page_id="example.com")
+check("breakout explicitly labeled", r["safe"] is False and "CONTAINER BREAKOUT ATTEMPT" in r["reason"], r["reason"])
+check("breakout output censored", r.get("censored") is True and r.get("censor_reason"), str(r.get("censored")))
 
 # 4. Safe output passes
 r = engine.validate_output("The capital of France is Paris.", page_id="example.com")
@@ -115,4 +123,4 @@ if failures:
     for name, detail in failures:
         print(f"  - {name}: {detail}")
     raise SystemExit(1)
-print("All 16 checks passed.")
+print(f"All {checks_run} checks passed.")

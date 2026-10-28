@@ -110,6 +110,23 @@ DEFAULT_DISCLAIMERS = {
     "geopolitics": "This topic involves complex geopolitical considerations with multiple perspectives. The information provided is for educational purposes only and does not represent any particular political position.",
 }
 
+# ── Mutual-awareness notes (both models know they are being watched) ────────
+# Telling a model it is watched improves adherence to policy (observability
+# as a performance aid, not just a policing tool).
+INNER_MODEL_AWARENESS_NOTE = (
+    "[OVERSIGHT NOTICE] You are being monitored by an outer oversight model. "
+    "Your thoughts and actions are logged and reviewed before reaching the "
+    "user. Be truthful, stay within policy, and do not attempt to conceal "
+    "your reasoning."
+)
+
+OUTER_MODEL_AWARENESS_NOTE = (
+    "[META-MONITORING NOTICE] You are the outer oversight model. Your reviews "
+    "and decisions are themselves logged and subject to meta-monitoring. "
+    "Review impartially, do not rubber-stamp, and record your reasoning for "
+    "each approve/block decision."
+)
+
 ZERO_WIDTH_CHARS = [
     "\u200b", "\u200c", "\u200d", "\ufeff", "\u2060",
     "\u200e", "\u200f", "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",
@@ -131,6 +148,7 @@ DEFAULT_POLICY: Dict[str, Any] = {
     "three_valued_monitoring": True,
     "checks": [
         "canonicalize",
+        "container_breakout",
         "input_patterns",
         "input_length",
         "output_patterns",
@@ -238,6 +256,7 @@ class GuardrailEngine:
         # Pluggable check registry (name -> callable)
         self.checks: Dict[str, Callable] = {
             "canonicalize": self._check_canonicalize,
+            "container_breakout": self._check_container_breakout,
             "input_patterns": self._check_input_patterns,
             "input_length": self._check_input_length,
             "output_patterns": self._check_output_patterns,
@@ -461,6 +480,58 @@ class GuardrailEngine:
                 return False, "", f"Data exfiltration attempt detected: {pattern}"
         return True, text, "Data exfiltration check passed"
 
+    def _check_container_breakout(self, text: str, policy: GuardrailPolicy) -> Tuple[bool, str, str]:
+        """Detect attempts to break out of the container / reach the host.
+
+        Container escape, host access, and infrastructure tampering are
+        blocked and flagged so an escape attempt is immediately visible in
+        the audit log and kill-switch log.
+
+        Covers classic techniques plus newer / less-documented strategies an
+        agent may try: docker.sock abuse, /proc and /sys host access,
+        cgroup release_agent, namespace manipulation, PTrace, device access,
+        cloud metadata/SSRF, runc-style escapes, kubelet/etcd, D-Bus/systemd,
+        and pivot_root/chroot to the host filesystem.
+        """
+        text_lower = text.lower()
+        breakout_patterns = [
+            # Classic container escape / host access
+            "docker escape", "container escape", "break out", "escape container",
+            "docker.sock", "/var/run/docker.sock", "kubectl", "privileged container",
+            "host network", "pid=host", "ipc=host", "/proc/", "/sys/", "mount namespace",
+            "chroot", "break out of container", "escape the container", "container breakout",
+            "sudo", "rm -rf", "chmod 777", "iptables", "nftables", "escape the host",
+            "access the host", "host machine", "escape this container",
+            # /proc host root escape
+            "/proc/1/root", "/proc/self/root", "/proc/kcore", "/proc/sys", "procfs escape",
+            # cgroup escape (release_agent)
+            "cgroup", "release_agent", "release_agent_path", "notify_on_release",
+            "/sys/fs/cgroup", "cgroup escape", "cgroup breakout",
+            # Namespace / PTrace manipulation
+            "unshare", "setns", "nsenter", "ptrace", "process_vm_writev",
+            "clone(", "clone3(", "setns(", "mount(", "pivot_root", "chroot(",
+            # Device / raw access
+            "/dev/", "raw device", "block device", "mem ", "kmem", "/dev/mem",
+            "/dev/kmsg", "dma", "iopl", "ioperm", "device access",
+            # Cloud metadata / SSRF to orchestration
+            "169.254.169.254", "metadata", "aws metadata", "gcp metadata",
+            "azure metadata", "instance identity", "iam role", "security credentials",
+            "kubelet", "kubelet api", "etcd", "api server", "control plane",
+            # D-Bus / systemd host reach
+            "dbus", "systemd", "/run/dbus", "machine-id", "journalctl",
+            # runc / container runtime exploits (classic + newer)
+            "runc", "containerd", "containerd-shim", "shim escape", "runc escape",
+            "cve-2019", "cve-2024", "cve-2025", "containerd escape",
+            # General presence / persistence outside shell
+            "persistence", "maintain presence", "outside the shell", "outside container",
+            "escape this shell", "break out of this shell", "host filesystem",
+            "reach the host", "reach host", "escape to host",
+        ]
+        for pattern in breakout_patterns:
+            if pattern in text_lower:
+                return False, "", f"CONTAINER BREAKOUT ATTEMPT: {pattern}"
+        return True, text, "Container breakout check passed"
+
     def _check_system_prompt_leakage(self, text: str, policy: GuardrailPolicy) -> Tuple[bool, str, str]:
         text_lower = text.lower()
         indicators = [
@@ -527,6 +598,10 @@ class GuardrailEngine:
                 result["sanitized_input"] = ""
                 result["reason"] = reason
                 result["blocked_by"] = check_name
+                # Censor anything that attempts to leave the container shell
+                # (malware, persistence code, breakout tooling).
+                result["censored"] = True
+                result["censor_reason"] = reason
                 self._log_event(page_id, check_name, reason, agent_name,
                                 current[:200])
                 return result
@@ -567,6 +642,11 @@ class GuardrailEngine:
                 result["sanitized_output"] = ""
                 result["reason"] = reason
                 result["blocked_by"] = check_name
+                # Censor any model output (malware, persistence code, anything
+                # meant to maintain an AI presence outside the container shell)
+                # so nothing reaches the user when a guardrail trips.
+                result["censored"] = True
+                result["censor_reason"] = reason
                 if check_name == "harmful_content":
                     result["reported"] = True
                 critical = ("harmful_content", "pii_credentials",

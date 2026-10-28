@@ -1,0 +1,25 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# model_server.py uses only the stdlib; curl is included for healthchecks.
+RUN apt-get update && apt-get install -y --no-install-recommends curl && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY model_server.py /app/model_server.py
+
+ENV MODEL_HOST=0.0.0.0
+ENV MODEL_PORT=8000
+# MODE_SERVER_MODE: local (deterministic, no weights) | upstream (proxy to OLLAMA_BASE_URL / OPENAI_BASE_URL)
+ENV MODE_SERVER_MODE=local
+ENV MODEL_NAME=container-model
+ENV OLLAMA_BASE_URL=
+ENV OPENAI_BASE_URL=
+ENV UPSTREAM_API_KEY=
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:8000/api/health || exit 1
+
+CMD ["python3", "model_server.py"]

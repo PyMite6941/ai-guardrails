@@ -14,6 +14,8 @@ export interface ValidateResult {
   reason: string;
   blockedBy: string | null;
   reported: boolean;
+  censored: boolean;
+  censorReason: string;
 }
 
 export interface AIGuardrailsOptions extends GuardrailOptions {}

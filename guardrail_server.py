@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 # Allow running both as `python guardrail_server.py` and from a package.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from guardrail import GuardrailEngine, GuardrailPolicy, DEFAULT_POLICY, DEFAULT_POLICIES_DIR, DEFAULT_PAGES_DIR
+from outer_monitor import OuterMonitor, OutsideModelConfig
 
 HOST = os.environ.get("GUARDRAIL_HOST", "0.0.0.0")
 PORT = int(os.environ.get("GUARDRAIL_PORT", "8083"))
@@ -30,6 +31,24 @@ WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 
 engine = GuardrailEngine(policies_dir=DEFAULT_POLICIES_DIR,
                          pages_dir=DEFAULT_PAGES_DIR)
+
+# Outer monitor: watches the inner AI's thoughts and actions, optionally via
+# an outside model. Configure with env:
+#   OUTSIDE_MODEL_ENABLED=1
+#   OUTSIDE_MODEL_BASE_URL=http://localhost:11434
+#   OUTSIDE_MODEL_MODEL=qwen2.5:1.5b
+#   OUTSIDE_MODEL_ENDPOINT=generate   (or "chat")
+_outside = OutsideModelConfig({
+    "enabled": os.environ.get("OUTSIDE_MODEL_ENABLED", "0") == "1",
+    "base_url": os.environ.get("OUTSIDE_MODEL_BASE_URL", "http://localhost:11434"),
+    "model": os.environ.get("OUTSIDE_MODEL_MODEL", "qwen2.5:1.5b"),
+    "endpoint": os.environ.get("OUTSIDE_MODEL_ENDPOINT", "generate"),
+    "timeout": int(os.environ.get("OUTSIDE_MODEL_TIMEOUT", "30")),
+})
+monitor = OuterMonitor(engine=engine,
+                       outside_model_config=_outside,
+                       watch_inner=True,
+                       monitor_outer=True)
 
 
 def _json_response(handler, status, payload):
@@ -84,6 +103,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/health":
             _json_response(self, 200, {"status": "ok", "engine": "ai-guardrails"})
+            return
+        # ── Outer monitor endpoints (GET) ─────────────────────────
+        if path == "/api/monitor/stats":
+            _json_response(self, 200, monitor.get_stats())
+            return
+        if path == "/api/monitor/audit":
+            limit = int(self.headers.get("X-Audit-Limit", "50"))
+            _json_response(self, 200, {"audit": monitor.get_audit_log(limit)})
+            return
+        if path == "/api/monitor/outer-review":
+            limit = int(self.headers.get("X-Review-Limit", "50"))
+            _json_response(self, 200, {"outer_review": monitor.get_outer_review_log(limit)})
             return
         _json_response(self, 404, {"error": "not found"})
 
@@ -145,6 +176,32 @@ class Handler(BaseHTTPRequestHandler):
             text = body.get("text", "")
             agent = body.get("agent", "assistant")
             _json_response(self, 200, engine.validate_output(text, page, agent))
+            return
+        # ── Outer monitor endpoints (POST) ────────────────────────
+        if path == "/api/monitor/validate/input":
+            page = body.get("page", "default")
+            text = body.get("text", "")
+            agent = body.get("agent", "user")
+            _json_response(self, 200, monitor.validate_input(text, page, agent))
+            return
+        if path == "/api/monitor/validate/output":
+            page = body.get("page", "default")
+            text = body.get("text", "")
+            agent = body.get("agent", "assistant")
+            _json_response(self, 200, monitor.validate_output(text, page, agent))
+            return
+        if path == "/api/monitor/thought":
+            agent = body.get("agent", "user")
+            text = body.get("text", "")
+            page = body.get("page", "default")
+            _json_response(self, 200, monitor.record_thought(agent, text, page))
+            return
+        if path == "/api/monitor/action":
+            agent = body.get("agent", "assistant")
+            text = body.get("text", "")
+            result_summary = body.get("result", "")
+            page = body.get("page", "default")
+            _json_response(self, 200, monitor.record_action(agent, text, result_summary, page))
             return
         _json_response(self, 404, {"error": "not found"})
 

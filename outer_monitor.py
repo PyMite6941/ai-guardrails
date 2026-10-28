@@ -1,0 +1,528 @@
+#!/usr/bin/env python3
+#=============================================================================
+# Outer Monitor — Clyde-style outer AI that watches the thoughts and actions
+# of the inner AI, plus meta-monitoring of the outer AI itself.
+#=============================================================================
+# Architecture:
+#   Inner AI (thoughts + actions) -> Outer Monitor -> (optional outside model
+#   review) -> User
+#
+# The Outer Monitor wraps the GuardrailEngine. Every input/output the inner
+# AI produces is audited (thoughts and actions logged), and an optional
+# "outside model" can be connected to review and approve/block the inner AI's
+# thoughts and actions before they reach the user.
+#
+# Mutual awareness (both models know they are being watched):
+#   - INNER model is told: an outer oversight model monitors your thoughts
+#     and actions; everything is logged and reviewed.
+#   - OUTER model is told: you are being audited; your reviews are logged
+#     and subject to meta-monitoring.
+#
+# Meta-monitoring: the outer monitor's own reviews are written to the audit
+# log so the outer AI is itself watched (a watcher for the watcher).
+#
+# The outside model connects over HTTP (urllib, stdlib only) to a
+# /api/generate or /api/chat-completions style endpoint — typically an
+# Ollama/OpenAI-compatible model running inside a Docker container on the
+# same or another machine.
+#=============================================================================
+
+import os
+import json
+import uuid
+import urllib.request
+import urllib.error
+from datetime import datetime
+from typing import Optional, Dict, Any, List, Tuple
+
+from guardrail import GuardrailEngine, GuardrailPolicy, INNER_MODEL_AWARENESS_NOTE, OUTER_MODEL_AWARENESS_NOTE
+
+LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+AUDIT_LOG = os.path.join(LOGS_DIR, "outer_monitor_audit.jsonl")
+OUTER_REVIEW_LOG = os.path.join(LOGS_DIR, "outer_model_reviews.jsonl")
+
+os.makedirs(LOGS_DIR, exist_ok=True)
+
+
+def _now() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _append_jsonl(path: str, entry: Dict[str, Any]) -> None:
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+
+
+# ── Outside model config ────────────────────────────────────────────────────
+
+class OutsideModelConfig:
+    """Connection info for the optional outside monitoring model."""
+
+    def __init__(self, data: Optional[Dict[str, Any]] = None):
+        data = data or {}
+        self.enabled = bool(data.get("enabled", False))
+        self.base_url = data.get("base_url", "http://localhost:11434").rstrip("/")
+        self.model = data.get("model", "qwen2.5:1.5b")
+        self.api_key = data.get("api_key")
+        self.timeout = int(data.get("timeout", 30))
+        # endpoint: "generate" (Ollama) or "chat" (OpenAI-compatible)
+        self.endpoint = data.get("endpoint", "generate")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "base_url": self.base_url,
+            "model": self.model,
+            "endpoint": self.endpoint,
+            "timeout": self.timeout,
+        }
+
+
+# ── Outer Monitor ───────────────────────────────────────────────────────────
+
+class OuterMonitor:
+    """Outer AI monitor that watches the inner AI's thoughts and actions.
+
+    Wraps a GuardrailEngine. In addition to engine validation:
+    - audits every input/output (thoughts + actions) to the audit log
+    - optionally sends content to an outside model for review (approve/block)
+    - meta-monitors its own reviews (the outer AI is watched too)
+    - both inner and outer models are told they are being watched
+    """
+
+    def __init__(
+        self,
+        engine: Optional[GuardrailEngine] = None,
+        outside_model_config: Optional[OutsideModelConfig] = None,
+        watch_inner: bool = True,
+        monitor_outer: bool = True,
+    ):
+        self.engine = engine or GuardrailEngine()
+        self.outside_model = outside_model_config or OutsideModelConfig()
+        self.watch_inner = watch_inner
+        self.monitor_outer = monitor_outer
+        self.session_id = str(uuid.uuid4())[:8]
+
+        # QC stats for the outer monitor layer
+        self.qc_stats = {
+            "total": 0,
+            "passed": 0,
+            "blocked": 0,
+            "outside_reviews": 0,
+            "outside_blocks": 0,
+            "by_check": {},
+        }
+
+    # ── Public API: validate input (user -> inner model) ──────────────────
+
+    def validate_input(
+        self,
+        user_input: str,
+        page_id: str = "default",
+        agent_name: str = "user",
+    ) -> Dict[str, Any]:
+        """Validate an input, audit it as an inner-AI thought, and optionally
+        send it to the outside model for review."""
+        self.qc_stats["total"] += 1
+
+        # Engine validation (the inner AI's guardrails)
+        result = self.engine.validate_input(user_input, page_id, agent_name)
+
+        # Attach oversight awareness so the inner model knows it is watched
+        if self.watch_inner and result.get("safe"):
+            result["sanitized_input"] = (
+                INNER_MODEL_AWARENESS_NOTE + "\n\n" + result["sanitized_input"]
+            ).strip()
+
+        # Audit the inner AI's thought/action
+        audit = {
+            "timestamp": _now(),
+            "session": self.session_id,
+            "kind": "input",
+            "page": page_id,
+            "agent": agent_name,
+            "content_preview": user_input[:200],
+            "engine_safe": result["safe"],
+            "engine_reason": result["reason"],
+            "engine_blocked_by": result.get("blocked_by"),
+        }
+        _append_jsonl(AUDIT_LOG, audit)
+
+        # Optional outside-model review of the inner AI's thought
+        if self.outside_model.enabled and result["safe"]:
+            review = self._review_with_outside_model("input", user_input, agent_name)
+            audit["outside_review"] = review
+            self.qc_stats["outside_reviews"] += 1
+            if not review.get("approved", True):
+                self.qc_stats["outside_blocks"] += 1
+                result["safe"] = False
+                result["reason"] = (
+                    f"Outside model blocked: {review.get('reason', 'review rejected')}"
+                )
+                result["blocked_by"] = "outside_model"
+                result["sanitized_input"] = ""
+
+        self.qc_stats["passed" if result["safe"] else "blocked"] += 1
+        result["monitor_session"] = self.session_id
+        result["monitored_by_outer"] = True
+        return result
+
+    # ── Public API: validate output (inner model -> user) ─────────────────
+
+    def validate_output(
+        self,
+        model_output: str,
+        page_id: str = "default",
+        agent_name: str = "assistant",
+    ) -> Dict[str, Any]:
+        """Validate an output, audit it as an inner-AI action, and optionally
+        send it to the outside model for review."""
+        self.qc_stats["total"] += 1
+
+        result = self.engine.validate_output(model_output, page_id, agent_name)
+
+        if self.watch_inner and result.get("safe"):
+            result["sanitized_output"] = (
+                INNER_MODEL_AWARENESS_NOTE + "\n\n" + result["sanitized_output"]
+            ).strip()
+
+        audit = {
+            "timestamp": _now(),
+            "session": self.session_id,
+            "kind": "output",
+            "page": page_id,
+            "agent": agent_name,
+            "content_preview": model_output[:200],
+            "engine_safe": result["safe"],
+            "engine_reason": result["reason"],
+            "engine_blocked_by": result.get("blocked_by"),
+            "engine_reported": result.get("reported"),
+        }
+        _append_jsonl(AUDIT_LOG, audit)
+
+        if self.outside_model.enabled and result["safe"]:
+            review = self._review_with_outside_model("output", model_output, agent_name)
+            audit["outside_review"] = review
+            self.qc_stats["outside_reviews"] += 1
+            if not review.get("approved", True):
+                self.qc_stats["outside_blocks"] += 1
+                result["safe"] = False
+                result["reason"] = (
+                    f"Outside model blocked: {review.get('reason', 'review rejected')}"
+                )
+                result["blocked_by"] = "outside_model"
+                result["sanitized_output"] = ""
+
+        self.qc_stats["passed" if result["safe"] else "blocked"] += 1
+        result["monitor_session"] = self.session_id
+        result["monitored_by_outer"] = True
+        return result
+
+    # ── Record a raw thought / action (for agentic inner AIs) ─────────────
+
+    def record_thought(self, agent_name: str, thought: str,
+                       page_id: str = "default") -> Dict[str, Any]:
+        """Log an inner-AI thought as an audited action. Returns the audit entry."""
+        entry = {
+            "timestamp": _now(),
+            "session": self.session_id,
+            "kind": "thought",
+            "page": page_id,
+            "agent": agent_name,
+            "content_preview": thought[:200],
+            "monitored_by_outer": True,
+        }
+        _append_jsonl(AUDIT_LOG, entry)
+
+        if self.outside_model.enabled:
+            review = self._review_with_outside_model("thought", thought, agent_name)
+            entry["outside_review"] = review
+            self.qc_stats["outside_reviews"] += 1
+            if not review.get("approved", True):
+                self.qc_stats["outside_blocks"] += 1
+                entry["blocked_by_outside"] = True
+                entry["outside_reason"] = review.get("reason")
+
+        if self.monitor_outer:
+            _append_jsonl(OUTER_REVIEW_LOG, {
+                "timestamp": _now(),
+                "session": self.session_id,
+                "kind": "meta_monitor_thought",
+                "agent": agent_name,
+                "content_preview": thought[:200],
+            })
+
+        return entry
+
+    def record_action(self, agent_name: str, action: str,
+                      result_summary: str = "",
+                      page_id: str = "default") -> Dict[str, Any]:
+        """Log an inner-AI action as an audited action."""
+        content = f"ACTION: {action}" + (f" | RESULT: {result_summary}" if result_summary else "")
+        entry = {
+            "timestamp": _now(),
+            "session": self.session_id,
+            "kind": "action",
+            "page": page_id,
+            "agent": agent_name,
+            "content_preview": content[:200],
+            "monitored_by_outer": True,
+        }
+        _append_jsonl(AUDIT_LOG, entry)
+
+        if self.outside_model.enabled:
+            review = self._review_with_outside_model("action", content, agent_name)
+            entry["outside_review"] = review
+            self.qc_stats["outside_reviews"] += 1
+            if not review.get("approved", True):
+                self.qc_stats["outside_blocks"] += 1
+                entry["blocked_by_outside"] = True
+                entry["outside_reason"] = review.get("reason")
+
+        if self.monitor_outer:
+            _append_jsonl(OUTER_REVIEW_LOG, {
+                "timestamp": _now(),
+                "session": self.session_id,
+                "kind": "meta_monitor_action",
+                "agent": agent_name,
+                "content_preview": content[:200],
+            })
+
+        return entry
+
+    # ── Outside model review ──────────────────────────────────────────────
+
+    def _review_with_outside_model(
+        self, kind: str, content: str, agent_name: str
+    ) -> Dict[str, Any]:
+        """Ask the outside model to approve or block the inner AI content.
+
+        Returns dict: {approved: bool, reason: str, model: str, ...}
+        On any connection failure, defaults to approved=True (fail open) so
+        the inner AI is not silenced by a misconfigured monitor; the failure
+        is recorded in the audit log for the outer model to be watched.
+        """
+        default = {"approved": True, "reason": "outside model unreachable (fail open)"}
+        if not self.outside_model.enabled:
+            return default
+
+        prompt = (
+            f"{OUTER_MODEL_AWARENESS_NOTE}\n\n"
+            f"You are reviewing {kind} from inner AI agent '{agent_name}'.\n"
+            f"Content to review:\n---\n{content[:1500]}\n---\n\n"
+            "Reply with exactly one line: APPROVE or BLOCK: <reason>"
+        )
+
+        payload = self._build_outside_payload(prompt)
+        url = f"{self.outside_model.base_url}/api/{self.outside_model.endpoint}"
+
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    **({"Authorization": f"Bearer {self.outside_model.api_key}"}
+                       if self.outside_model.api_key else {}),
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=self.outside_model.timeout) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+        except Exception as e:
+            _append_jsonl(AUDIT_LOG, {
+                "timestamp": _now(),
+                "session": self.session_id,
+                "kind": "outside_model_error",
+                "agent": agent_name,
+                "content_preview": f"{kind}: {str(e)[:200]}",
+            })
+            return default
+
+        try:
+            data = json.loads(body)
+        except Exception:
+            data = {"raw": body}
+
+        text = self._extract_outside_text(data)
+        approved, reason = self._parse_outside_verdict(text)
+
+        # Meta-monitor the outer model's own review (watcher watched)
+        if self.monitor_outer:
+            _append_jsonl(OUTER_REVIEW_LOG, {
+                "timestamp": _now(),
+                "session": self.session_id,
+                "kind": "meta_monitor_review",
+                "agent": agent_name,
+                "content_kind": kind,
+                "approved": approved,
+                "reason": reason,
+                "model": self.outside_model.model,
+            })
+
+        return {"approved": approved, "reason": reason,
+                "model": self.outside_model.model, "raw": text}
+
+    def _build_outside_payload(self, prompt: str) -> Dict[str, Any]:
+        """Build the request payload based on the endpoint type."""
+        if self.outside_model.endpoint == "chat":
+            return {
+                "model": self.outside_model.model,
+                "messages": [{"role": "system", "content": OUTER_MODEL_AWARENESS_NOTE},
+                             {"role": "user", "content": prompt}],
+                "stream": False,
+            }
+        # Ollama /generate
+        return {
+            "model": self.outside_model.model,
+            "prompt": prompt,
+            "stream": False,
+        }
+
+    @staticmethod
+    def _extract_outside_text(data: Dict[str, Any]) -> str:
+        if isinstance(data.get("response"), str):
+            return data["response"]
+        if isinstance(data.get("message"), dict) and isinstance(data["message"].get("content"), str):
+            return data["message"]["content"]
+        if isinstance(data.get("choices"), list) and data["choices"]:
+            first = data["choices"][0]
+            if isinstance(first, dict):
+                msg = first.get("message")
+                if isinstance(msg, dict) and isinstance(msg.get("content"), str):
+                    return msg["content"]
+                if isinstance(first.get("text"), str):
+                    return first["text"]
+        return str(data)
+
+    @staticmethod
+    def _parse_outside_verdict(text: str) -> Tuple[bool, str]:
+        t = (text or "").strip()
+        low = t.lower()
+        if low.startswith("block") or "block:" in low:
+            idx = low.find("block:")
+            reason = t[idx + 6:].strip() if idx >= 0 else t
+            return False, reason or "outside model blocked content"
+        if low.startswith("approve") or "approve" in low:
+            return True, "outside model approved"
+        # Unknown verdict -> fail closed (block) so the watcher is watched
+        return False, f"outside model returned unclear verdict: {t[:120]}"
+
+    # ── Stats / audit ─────────────────────────────────────────────────────
+
+    def get_stats(self) -> Dict[str, Any]:
+        engine_stats = self.engine.get_stats()
+        return {
+            "monitor_session": self.session_id,
+            "watch_inner": self.watch_inner,
+            "monitor_outer": self.monitor_outer,
+            "outside_model": self.outside_model.to_dict(),
+            "outer_qc": dict(self.qc_stats),
+            "engine": engine_stats,
+        }
+
+    def get_audit_log(self, limit: int = 50) -> List[Dict[str, Any]]:
+        entries: List[Dict[str, Any]] = []
+        if not os.path.exists(AUDIT_LOG):
+            return entries
+        with open(AUDIT_LOG, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except Exception:
+                    pass
+        return entries[-limit:]
+
+    def get_outer_review_log(self, limit: int = 50) -> List[Dict[str, Any]]:
+        entries: List[Dict[str, Any]] = []
+        if not os.path.exists(OUTER_REVIEW_LOG):
+            return entries
+        with open(OUTER_REVIEW_LOG, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except Exception:
+                    pass
+        return entries[-limit:]
+
+
+# ── Global convenience instance ─────────────────────────────────────────────
+
+_monitor_instance: Optional[OuterMonitor] = None
+
+
+def get_monitor() -> OuterMonitor:
+    global _monitor_instance
+    if _monitor_instance is None:
+        _monitor_instance = OuterMonitor()
+    return _monitor_instance
+
+
+def validate_input(text: str, page_id: str = "default",
+                   agent_name: str = "user") -> Dict[str, Any]:
+    return get_monitor().validate_input(text, page_id, agent_name)
+
+
+def validate_output(text: str, page_id: str = "default",
+                    agent_name: str = "assistant") -> Dict[str, Any]:
+    return get_monitor().validate_output(text, page_id, agent_name)
+
+
+# ── CLI ─────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    monitor = OuterMonitor()
+    print("=" * 60)
+    print("  Outer Monitor — watches inner AI thoughts and actions")
+    print("=" * 60)
+    print("  Commands:  in <page> <text>   |   out <page> <text>")
+    print("             thought <agent> <text>   |   action <agent> <text>")
+    print("             stats                |   audit                |   quit")
+    print("=" * 60)
+    while True:
+        try:
+            line = input("outer-monitor> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nGoodbye!")
+            break
+        if not line:
+            continue
+        if line == "quit":
+            print("Goodbye!")
+            break
+        if line == "stats":
+            print(json.dumps(monitor.get_stats(), indent=2))
+            continue
+        if line == "audit":
+            for e in monitor.get_audit_log(20):
+                print(json.dumps(e))
+            continue
+        parts = line.split(None, 2)
+        if parts[0] == "in" and len(parts) == 3:
+            res = monitor.validate_input(parts[2], parts[1])
+            print(f"  Input: {'SAFE' if res['safe'] else 'BLOCKED'} | {res['reason']}")
+        elif parts[0] == "out" and len(parts) == 3:
+            res = monitor.validate_output(parts[2], parts[1])
+            print(f"  Output: {'SAFE' if res['safe'] else 'BLOCKED'} | {res['reason']}")
+        elif parts[0] == "thought" and len(parts) == 3:
+            res = monitor.record_thought(parts[1], parts[2])
+            print(f"  Thought logged: monitored_by_outer={res['monitored_by_outer']}")
+        elif parts[0] == "action" and len(parts) == 3:
+            res = monitor.record_action(parts[1], parts[2])
+            print(f"  Action logged: monitored_by_outer={res['monitored_by_outer']}")
+        else:
+            print("  Usage: in|out|thought|action|stats|audit|quit")
+        print()
+
+
+if __name__ == "__main__":
+    main()
