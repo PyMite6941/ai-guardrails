@@ -233,6 +233,51 @@ localhost is the expected default for local model serving.
 - Sessions are regenerated on login (session fixation protection).
 - Sessions expire after `GUARDRAIL_SESSION_TTL` seconds (default 3600).
 
+**Logging — structured JSONL with rotation:**
+
+All guardrail modules write structured JSONL log entries to the logs directory
+(configured via `AI_GUARDRAILS_LOG_DIR`, default `./logs`). Each module writes
+to its own file (`logs/guardrail.jsonl`, `logs/outer_monitor_audit.jsonl`,
+`logs/outer_model_reviews.jsonl`, `logs/trusted_model_audits.jsonl`,
+`logs/integrity_ledger.jsonl`, `logs/human_loop.jsonl`,
+`logs/canary.jsonl`, etc.).
+
+Log entries include timestamp, level, module, session ID, and structured data.
+Log rotation is size-based (configured via `AI_GUARDRAIL_LOG_ROTATE`, default
+10 MB) and keeps a configurable number of rotated files
+(`AI_GUARDRAIL_LOG_KEEP`, default 5).
+
+**Cron jobs — scheduled maintenance:**
+
+Cron jobs are installed via `./scripts/cron/setup_cron.sh install` and run
+automatically on a schedule. All cron scripts live in `scripts/cron/` and are
+environment-configured (no hardcoded paths).
+
+| Cron job | Schedule | Purpose |
+|----------|----------|---------|
+| `canary_probe.sh` | Every 5 minutes | Sends synthetic test inputs through the live guardrail to verify the gate is still firing (catches "dead gate" where guardrails are silently disabled). |
+| `integrity_check.sh` | Every 15 minutes | Re-hashes all watched guardrail files and compares against the signed baseline; alerts on any tampering. |
+| `update_check.sh` | Daily at 02:00 | Refreshes component versions and lists any security updates that are past due. |
+| `session_cleanup.sh` | Every hour | Logs session TTL info; in-memory sessions expire automatically via TTL. |
+| `log_rotate.sh` | Daily at 03:00 | Triggers log rotation on all guardrail log files. |
+
+Install cron jobs:
+```
+./scripts/cron/setup_cron.sh install
+```
+
+List installed cron jobs:
+```
+./scripts/cron/setup_cron.sh list
+```
+
+Remove cron jobs:
+```
+./scripts/cron/setup_cron.sh remove
+```
+
+Cron jobs log to `logs/cron_*.log` in the guardrail log directory.
+
 **Kill switch:**
 - Log injection prevented: the reason string is stripped of newlines before
   being written to `logs/kill-switch.log`.

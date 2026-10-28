@@ -61,6 +61,15 @@ except Exception:  # pragma: no cover - fallback only
     _leak_scan = None
     LeakagePrevention = None  # type: ignore
 
+from guardrail_auth import (
+    authenticate, path_tier, send_json, send_auth_error,
+    read_body_limited, create_session, validate_session, destroy_session,
+    verify_password, has_password, set_password, is_auth_configured,
+    ADMIN_API_KEY, VIEW_API_KEY, ALLOWED_IPS, ALLOWED_ORIGINS,
+    RATE_LIMIT, MAX_BODY_SIZE, BIND_HOST,
+)
+from guardrail_logging import get_logger, log as _log, LOG_DIR as GUARD_LOG_DIR
+
 # ── Paths ──────────────────────────────────────────────────────────────────
 # Resolve relative to this file so the engine works from any cwd / inside Docker.
 ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -68,24 +77,23 @@ PROJECT_DIR = ENGINE_DIR
 DEFAULT_POLICIES_DIR = os.path.join(PROJECT_DIR, "policies")
 DEFAULT_PAGES_DIR = os.path.join(DEFAULT_POLICIES_DIR, "pages")
 PERSONAL_CONFIG_PATH = os.path.expanduser("~/.ai_guardrails_config.json")
-LOGS_DIR = os.path.join(PROJECT_DIR, "logs")
-ENGINE_LOG = os.path.join(LOGS_DIR, "ai_guardrails.log")
+LOGS_DIR = GUARD_LOG_DIR
+ENGINE_LOG = os.path.join(LOGS_DIR, "guardrail.jsonl")
 KILL_SWITCH_SCRIPT = os.path.join(PROJECT_DIR, "scripts", "kill-switch.sh")
 
 os.makedirs(LOGS_DIR, exist_ok=True)
 os.makedirs(DEFAULT_PAGES_DIR, exist_ok=True)
 
+# ── Unified logger ────────────────────────────────────────────────────────
+_logger = get_logger("guardrail")
+
 
 def log(message: str, level: str = "INFO") -> None:
-    """Module-level log function."""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    line = f"[{timestamp}] [{level}] {message}\n"
-    print(line, end="")
-    try:
-        with open(ENGINE_LOG, "a") as f:
-            f.write(line)
-    except Exception:
-        pass
+    """Module-level log function — writes structured JSONL to logs/guardrail.jsonl
+    and stdout. Backward compatible with previous log() signature."""
+    _logger.log(level, message)
+    # Also print to stdout for compatibility with tmux/docker logging
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{level}] {message}", end="")
 
 
 # ── Default patterns (Clyde-style, safe defaults) ──────────────────────────
