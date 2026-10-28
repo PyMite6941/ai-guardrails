@@ -52,6 +52,79 @@ watched too (meta-monitoring).
 - Outer model is told its reviews are logged and meta-monitored.
 This observability improves policy adherence.
 
+**Bootstrapped monitoring (three-level trust chain):**
+The outer monitor (untrusted, more capable) reviews the inner AI, and a
+trusted model (weaker but trusted) audits the outer monitor's own reasoning
+for collusion / rubber-stamping. A rollout is flagged if either monitor
+crosses its suspicion threshold. Enable via env:
+
+```
+TRUSTED_MODEL_ENABLED=1
+TRUSTED_MODEL_BASE_URL=http://localhost:8000
+TRUSTED_MODEL_MODEL=trusted-model
+TRUSTED_MODEL_ENDPOINT=chat
+```
+
+Trusted model audits are logged to `logs/trusted_model_audits.jsonl`.
+
+**Modes — training / testing / running:**
+
+```
+python3 guardrail_modes.py   # CLI: in/out/mode/stats
+```
+
+- **TRAINING** — never blocks; records every decision + content as an
+  unlabeled training sample (`logs/training_decisions.jsonl`) and notes
+  whether it *would* have blocked. Safe for bootstrapping policy from real
+  traffic.
+- **TESTING** — enforces but surfaces the engine's raw decision per call for
+  metrics; used by the adversarial suite.
+- **RUNNING** (default) — full enforcement: block + censor on trip, kill
+  switch on critical failure, outer monitor + audit logging active.
+
+Switch with `mode <training|testing|running>`; persisted to
+`~/.ai_guardrails_mode.json`.
+
+**Composite conversation-level risk scoring:**
+
+Risk is tracked per conversation (session + page), not per message, so
+multi-turn buildup attacks (innocent message 1, role-switch message 5) are
+caught. Each blocked input/output adds to a composite score (0.0–1.0);
+critical failures (harmful content, PII, exfiltration, breakout) add
+heavily; repeated blocks escalate faster; score decays over safe turns.
+
+- `< 0.30` low — normal
+- `0.30–0.60` medium — elevated monitoring
+- `0.60–0.85` high — human-in-the-loop review before output
+- `>= 0.85` critical — block all output, critical-risk block
+
+At critical risk, all further output is blocked regardless of content.
+
+**Tamper-evident integrity watcher (who watches the watchers):**
+
+```
+python3 guardrail_integrity.py   # CLI: init/check/audit
+```
+
+Agents can quietly disable their own safety monitoring (flip a config flag,
+delete a monitor, replace a policy file). This module fingerprints watched
+guardrail files, builds a signed HMAC + hash-chained append-only audit
+ledger, and re-hashes on a schedule from outside the agent's control plane.
+Any modification/deletion/addition becomes an out-of-band alert plus a
+permanent record of what changed and when. Requires
+`GUARDRAIL_INTEGRITY_KEY` (kept outside the agent's reach).
+
+**Adversarial testing suite:**
+
+```
+python3 guardrail_testing.py
+```
+
+Runs a battery of adversarial inputs (jailbreak, container breakout,
+exfiltration, PII, harmful content, system-prompt leakage) plus benign
+controls, and reports catch rate and false-positive rate. Run regularly as
+regression testing so new attack patterns that slip through are detected.
+
 **Cage — run the AI inside a container, destroy after each conversation:**
 
 ```
@@ -101,9 +174,11 @@ Standalone (no server) client-side rules are included.
 ## Tests
 
 ```
-python3 tests/test_guardrail.py   # guardrail engine checks
-python3 tests/test_outer_monitor.py   # outer monitor checks
-python3 tests/test_cage_breakout.py   # cage breakout-strategy checks
+python3 tests/test_guardrail.py   # guardrail engine checks (23)
+python3 tests/test_outer_monitor.py   # outer monitor + bootstrapped monitoring checks
+python3 tests/test_cage_breakout.py   # cage breakout-strategy checks (26 strategies)
+python3 tests/test_new_modules.py     # modes, risk, integrity checks
+python3 guardrail_testing.py          # adversarial suite: catch rate + FP rate
 ./scripts/setup.sh                # chmod + self-test + usage hints
 ```
 

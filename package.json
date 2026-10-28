@@ -27,6 +27,10 @@
     "guardrail.py",
     "guardrail_server.py",
     "outer_monitor.py",
+    "guardrail_modes.py",
+    "guardrail_risk.py",
+    "guardrail_integrity.py",
+    "guardrail_testing.py",
     "policies/",
     "docker/",
     "tmux/"
