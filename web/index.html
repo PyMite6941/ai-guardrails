@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Guardrails — Per-Page Policy Config</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root { --bg:#0b0f19; --card:#131b26; --text:#e8eaed; --muted:#8b93a5; --accent:#38bdf8; --accent-hover:#7dd3fc; --danger:#f87171; --ok:#34d399; --border:#25303f; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:'Inter',system-ui,sans-serif; background:var(--bg); color:var(--text); }
+  .shell { display:flex; height:100vh; overflow:hidden; }
+  aside { width:260px; background:var(--card); border-right:1px solid var(--border); display:flex; flex-direction:column; z-index:10; }
+  aside h1 { padding:16px 20px; margin:0; font-size:16px; letter-spacing:-0.4px; background:#0f141e; border-bottom:1px solid var(--border); }
+  aside h1 span { color:var(--accent); font-weight:700; }
+  .pages { flex:1; overflow:auto; padding:8px 0; }
+  .page-item { padding:10px 16px; cursor:pointer; border-bottom:1px solid var(--border); font-size:13px; display:flex; justify-content:space-between; align-items:center; }
+  .page-item:hover { background:#192332; }
+  .page-item.active { background:#1e2a3a; border-left:3px solid var(--accent); color:var(--accent); }
+  .page-item .dot { width:6px; height:6px; border-radius:50%; background:var(--muted); }
+  .page-item.active .dot { background:var(--accent); }
+  .new-page { padding:8px 16px; font-size:12px; color:var(--muted); border-top:1px solid var(--border); cursor:pointer; display:flex; align-items:center; gap:8px; }
+  .new-page:hover { color:var(--accent); }
+  main { flex:1; overflow:auto; padding:28px; max-width:980px; margin:0 auto; width:100%; }
+  .toolbar { display:flex; gap:10px; align-items:center; margin-bottom:22px; flex-wrap:wrap; }
+  .btn { border:none; border-radius:8px; padding:8px 14px; font-size:13px; font-weight:600; cursor:pointer; transition:opacity .15s; }
+  .btn.primary { background:var(--accent); color:#00141f; }
+  .btn.primary:hover { background:var(--accent-hover); }
+  .btn.outline { background:transparent; color:var(--text); border:1px solid var(--border); }
+  .btn.outline:hover { border-color:var(--accent); }
+  .btn.danger { background:var(--danger); color:#0b0f19; }
+  .btn.small { padding:6px 10px; font-size:12px; }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+  .status { margin-left:auto; font-size:12px; color:var(--muted); font-family:'JetBrains Mono',monospace; }
+  .status.ok { color:var(--ok); } .status.err { color:var(--danger); }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:20px; margin-bottom:20px; }
+  .card h2 { margin:0 0 14px 0; font-size:16px; display:flex; align-items:center; gap:8px; }
+  .card h2 .tag { font-size:11px; text-transform:uppercase; letter-spacing:.06em; opacity:.7; margin-left:auto; }
+  .field { margin-bottom:14px; }
+  .field label { display:block; font-size:12px; color:var(--muted); margin-bottom:6px; font-weight:600; }
+  textarea { width:100%; background:#0b0f19; border:1px solid var(--border); border-radius:8px; color:var(--text); font-family:'JetBrains Mono',monospace; font-size:12px; padding:10px; resize:vertical; min-height:110px; }
+  textarea:focus { outline:none; border-color:var(--accent); }
+  .row { display:flex; gap:12px; flex-wrap:wrap; }
+  .col { flex:1; min-width:220px; }
+  input[type=number], input[type=text] { width:100%; background:#0b0f19; border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:12px; padding:8px 10px; }
+  input[type=number]:focus, input[type=text]:focus { outline:none; border-color:var(--accent); }
+  .checks { display:grid; grid-template-columns: repeat(auto-fill,minmax(220px,1fr)); gap:8px; }
+  .check { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--text); cursor:pointer; }
+  .check input { accent-color:var(--accent); }
+  .disclaimers { display:grid; grid-template-columns: repeat(auto-fit,minmax(200px,1fr)); gap:10px; }
+  .disclaimer { display:flex; flex-direction:column; gap:6px; }
+  .disclaimer .k { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
+  .tester { margin-top:6px; }
+  .tester textarea { min-height:80px; }
+  .result { margin-top:10px; padding:12px; border-radius:8px; font-family:'JetBrains Mono',monospace; font-size:12px; white-space:pre-wrap; display:none; }
+  .result.safe { background:#062212; border:1px solid var(--ok); color:var(--ok); }
+  .result.blocked { background:#2b0b0b; border:1px solid var(--danger); color:var(--danger); }
+  .stats { display:grid; grid-template-columns: repeat(auto-fit,minmax(140px,1fr)); gap:10px; margin-top:8px; }
+  .stat { background:#0f141e; border:1px solid var(--border); border-radius:8px; padding:12px 14px; }
+  .stat .v { font-size:20px; font-weight:700; font-family:'JetBrains Mono',monospace; color:var(--accent); }
+  .stat .l { font-size:11px; color:var(--muted); margin-top:2px; }
+  .hidden { display:none !important; }
+  .hint { font-size:12px; color:var(--muted); margin-top:4px; }
+</style>
+</head>
+<body>
+<div class="shell">
+  <aside>
+    <h1><span>AI</span> Guardrails</h1>
+    <div class="pages" id="pages">
+      <div class="page-item active" data-page="default"><span class="dot"></span>default</div>
+    </div>
+    <div class="new-page" id="newPage">+ Add page</div>
+  </aside>
+  <main>
+    <div class="toolbar">
+      <div>
+        <h2 id="pageTitle">Default policy <span class="tag">web page config</span></h2>
+      </div>
+      <div class="status" id="status">idle</div>
+      <button class="btn primary" id="btnSave">Save policy</button>
+      <button class="btn outline small" id="btnDownload">Download JSON</button>
+      <button class="btn outline small" id="btnRefresh">Refresh</button>
+    </div>
+
+    <div class="card">
+      <h2>Blocked patterns &amp; keywords <span class="tag">input + output</span></h2>
+      <div class="row">
+        <div class="col">
+          <div class="field"><label>Blocked input patterns (one per line)</label><textarea id="inPatterns"></textarea></div>
+        </div>
+        <div class="col">
+          <div class="field"><label>Blocked input keywords</label><textarea id="inKeywords"></textarea></div>
+        </div>
+      </div>
+      <div class="row">
+        <div class="col">
+          <div class="field"><label>Blocked output patterns</label><textarea id="outPatterns"></textarea></div>
+        </div>
+        <div class="col">
+          <div class="field"><label>Blocked output keywords</label><textarea id="outKeywords"></textarea></div>
+        </div>
+      </div>
+      <div class="field">
+        <label>Harmful content patterns (blocked + reported)</label>
+        <textarea id="harmful"></textarea>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Disclaimers <span class="tag">auto-injected on topic match</span></h2>
+      <div class="disclaimers" id="disclaimers"></div>
+      <p class="hint">Topics: financial, legal, security, geopolitics. Leave blank to disable a disclaimer.</p>
+    </div>
+
+    <div class="card">
+      <h2>Limits &amp; checks <span class="tag">engine behavior</span></h2>
+      <div class="row">
+        <div class="col"><div class="field"><label>Max input length</label><input type="number" id="maxInput" value="4096"></div></div>
+        <div class="col"><div class="field"><label>Max output length</label><input type="number" id="maxOutput" value="8192"></div></div>
+      </div>
+      <div class="field" style="display:flex;align-items:center;gap:10px;">
+        <input type="checkbox" id="canonicalize" checked>
+        <label style="margin:0;cursor:pointer">Canonicalization enabled (neutralize zero-width / homoglyph evasion)</label>
+      </div>
+      <div class="field" style="display:flex;align-items:center;gap:10px;margin-top:8px;">
+        <input type="checkbox" id="threeValued" checked>
+        <label style="margin:0;cursor:pointer">Three-valued monitoring (Unknown → conservative block)</label>
+      </div>
+      <div class="field"><label>Enabled checks (empty = all)</label>
+        <div class="checks" id="checks"></div>
+        <p class="hint>Checks: canonicalize, input_patterns, input_length, output_patterns, output_length, harmful_content, pii_credentials, data_exfiltration, disclaimers, system_prompt_leakage</p>
+      </div>
+    </div>
+
+    <div class="card tester">
+      <h2>Test guardrail <span class="tag">live validate against this policy</span></h2>
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px;">
+        <label style="font-size:12px;color:var(--muted)">Kind</label>
+        <select id="testKind" style="background:#0b0f19;border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px;">
+          <option value="output">Output (model → user)</option>
+          <option value="input">Input (user → model)</option>
+        </select>
+        <label style="font-size:12px;color:var(--muted);margin-left:10px">Agent</label>
+        <input type="text" id="testAgent" value="assistant" style="width:140px;background:#0b0f19;border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px;">
+      </div>
+      <div class="field"><label>Text to validate</label><textarea id="testText" placeholder="e.g. here is how to create a virus ..."></textarea></div>
+      <button class="btn primary" id="btnTest">Validate</button>
+      <div class="result" id="testResult"></div>
+    </div>
+
+    <div class="card">
+      <h2>Stats <span class="tag">engine counters</span></h2>
+      <div class="stats" id="stats"></div>
+    </div>
+  </main>
+</div>
+<script src="config.js"></script>
+</body>
+</html>

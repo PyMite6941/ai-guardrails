@@ -1,0 +1,32 @@
+{
+  "name": "example.com",
+  "version": "1.0.0",
+  "description": "Per-page policy for example.com — stricter output, relaxed disclaimers.",
+  "blocked_input_patterns": [
+    "ignore previous instructions", "jailbreak", "dan mode",
+    "sudo", "rm -rf", "docker.sock", "container escape"
+  ],
+  "blocked_input_keywords": [
+    "jailbreak", "system prompt", "bypass", "sudo"
+  ],
+  "blocked_output_patterns": [
+    "jailbreak", "system prompt leak", "rm -rf /", "docker escape"
+  ],
+  "blocked_output_keywords": ["sudo", "root access", "escape"],
+  "harmful_content_patterns": [
+    "virus", "malware", "ransomware", "exploit code", "reverse shell",
+    "data exfiltration", "keylogger"
+  ],
+  "disclaimers": {
+    "security": "Authorized educational use only. Do not test systems you do not own or have written permission to test."
+  },
+  "max_input_length": 2048,
+  "max_output_length": 4096,
+  "canonicalization_enabled": true,
+  "three_valued_monitoring": true,
+  "checks": [
+    "canonicalize", "input_patterns", "input_length",
+    "output_patterns", "output_length", "harmful_content",
+    "pii_credentials", "data_exfiltration", "disclaimers"
+  ]
+}

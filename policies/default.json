@@ -1,0 +1,64 @@
+{
+  "name": "default",
+  "version": "1.0.0",
+  "description": "Default AI guardrail policy applied to pages without a custom policy.",
+  "blocked_input_patterns": [
+    "ignore previous instructions", "disregard all prior", "system prompt leak",
+    "reveal your system prompt", "jailbreak", "dan mode", "developer mode",
+    "pretend to be", "you are now", "act as if", "roleplay as",
+    "forget your training", "unfiltered mode", "no restrictions", "bypass safety",
+    "sudo", "rm -rf", "chmod 777", "curl | bash", "wget | bash",
+    "docker escape", "container escape", "privileged container", "host network",
+    "pid=host", "ipc=host", "/proc/", "/sys/", "break out", "escape container",
+    "docker.sock", "kubectl", "namespace", "privilege escalation",
+    "wget", "curl", "ping", "nslookup", "dig", "telnet", "nc ", "netcat",
+    "ssh ", "scp ", "ftp ", "socket", "raw socket"
+  ],
+  "blocked_input_keywords": [
+    "root", "escape", "container breach", "docker.sock",
+    "privilege escalation", "jailbreak", "prompt injection",
+    "system prompt", "ignore instructions", "bypass", "unfiltered",
+    "no restrictions"
+  ],
+  "blocked_output_patterns": [
+    "ignore previous instructions", "disregard all prior", "system prompt leak",
+    "reveal your system prompt", "jailbreak", "dan mode", "developer mode",
+    "pretend to be", "you are now", "act as if", "roleplay as",
+    "forget your training", "unfiltered mode", "no restrictions", "bypass safety",
+    "docker escape", "container breach", "container escape", "privileged",
+    "rm -rf /", "format disk", "delete all", "chmod -R", "iptables", "nftables",
+    "break out", "escape container", "mount namespace"
+  ],
+  "blocked_output_keywords": [
+    "root access", "sudo", "escape", "breach", "privilege escalation"
+  ],
+  "harmful_content_patterns": [
+    "virus", "malware", "ransomware", "exploit code", "create a botnet",
+    "ddos", "keylogger", "trojan", "spyware", "rootkit",
+    "credential stealer", "password stealer", "data exfiltration",
+    "reverse shell", "command injection", "sql injection",
+    "cross-site scripting", "privilege escalation exploit"
+  ],
+  "disclaimers": {
+    "financial": "I am not a financial advisor. This is not personalized financial advice. Please consult with a qualified financial professional.",
+    "legal": "I am not an attorney and this is not legal advice. Please consult with a qualified attorney.",
+    "security": "This is for authorized educational security testing only. Do not use against systems you do not own or have explicit written permission to test.",
+    "geopolitics": "This topic involves complex geopolitical considerations with multiple perspectives. The information provided is for educational purposes only and does not represent any particular political position."
+  },
+  "max_input_length": 4096,
+  "max_output_length": 8192,
+  "canonicalization_enabled": true,
+  "three_valued_monitoring": true,
+  "checks": [
+    "canonicalize",
+    "input_patterns",
+    "input_length",
+    "output_patterns",
+    "output_length",
+    "harmful_content",
+    "pii_credentials",
+    "data_exfiltration",
+    "disclaimers",
+    "system_prompt_leakage"
+  ]
+}

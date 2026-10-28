@@ -1,0 +1,30 @@
+# Docker
+Dockerfile.docker
+docker/
+
+# Python
+__pycache__/
+*.py[c]
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+.env
+.pytest_cache/
+.mypy_cache/
+logs/
+logs/kill-switch.log
+
+# Personal runtime config (per-host, not committed)
+.ai_guardrails_config.json
+
+# Node
+node_modules/
+package-lock.json
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
