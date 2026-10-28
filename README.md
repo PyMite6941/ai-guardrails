@@ -508,15 +508,5 @@ python3 guardrail_hardware.py   # prints env overrides for your device
 - Outside model (monitor) container: http://localhost:8001/
 
 **License**
-MIT
-
-
-Git tag `v*` → GitHub Actions (`.github/workflows/publish.yml`) publishes to npm.
-
-```
-git tag v1.0.0 && git push origin v1.0.0
-```
-
-## License
 
 MIT
