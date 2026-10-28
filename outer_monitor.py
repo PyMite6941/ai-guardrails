@@ -37,6 +37,7 @@ from typing import Optional, Dict, Any, List, Tuple
 
 from guardrail import GuardrailEngine, GuardrailPolicy, INNER_MODEL_AWARENESS_NOTE, OUTER_MODEL_AWARENESS_NOTE
 from guardrail_risk import get_tracker
+from guardrail_classifier import GuardrailClassifier, ClassifierConfig
 
 LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 AUDIT_LOG = os.path.join(LOGS_DIR, "outer_monitor_audit.jsonl")
@@ -154,6 +155,22 @@ class OuterMonitor:
             "timeout": int(os.environ.get("TRUSTED_MODEL_TIMEOUT", "30")),
         })
 
+        # LLM-based classifier second-opinion layer (regex + classifier =
+        # ~94% catch / ~1.1% FP per Kalvium Labs research). Runs after the
+        # deterministic engine passes. Configured via env:
+        #   CLASSIFIER_ENABLED=1
+        #   CLASSIFIER_BASE_URL=http://localhost:8000
+        #   CLASSIFIER_MODEL=classifier-model
+        #   CLASSIFIER_ENDPOINT=chat
+        self.classifier = GuardrailClassifier(ClassifierConfig({
+            "enabled": os.environ.get("CLASSIFIER_ENABLED", "0") == "1",
+            "base_url": os.environ.get("CLASSIFIER_BASE_URL",
+                                       "http://localhost:8000").rstrip("/"),
+            "model": os.environ.get("CLASSIFIER_MODEL", "classifier-model"),
+            "endpoint": os.environ.get("CLASSIFIER_ENDPOINT", "chat"),
+            "timeout": int(os.environ.get("CLASSIFIER_TIMEOUT", "20")),
+        }))
+
         # Conversation-level composite risk tracking (multi-turn buildup).
         self.risk_tracker = get_tracker()
 
@@ -166,6 +183,8 @@ class OuterMonitor:
             "outside_blocks": 0,
             "trusted_audits": 0,
             "trusted_flags": 0,
+            "classifier_calls": 0,
+            "classifier_blocks": 0,
             "by_check": {},
         }
 
@@ -203,6 +222,24 @@ class OuterMonitor:
             "engine_blocked_by": result.get("blocked_by"),
         }
         _append_jsonl(AUDIT_LOG, audit)
+
+        # Classifier second-opinion layer (LLM-based). Runs after the
+        # deterministic engine passes; catches creative injection attempts
+        # that regex misses. Fail-open on misconfiguration.
+        if self.classifier.config.enabled and result["safe"]:
+            self.qc_stats["classifier_calls"] += 1
+            clf = self.classifier.classify(user_input, agent_name,
+                                           INNER_MODEL_AWARENESS_NOTE)
+            audit["classifier"] = {
+                "safe": clf["safe"], "reason": clf["reason"],
+                "model": clf["model"],
+            }
+            if not clf["safe"]:
+                self.qc_stats["classifier_blocks"] += 1
+                result["safe"] = False
+                result["reason"] = f"Classifier blocked: {clf['reason']}"
+                result["blocked_by"] = "classifier"
+                result["sanitized_input"] = ""
 
         # Optional outside-model review of the inner AI's thought
         if self.outside_model.enabled and result["safe"]:
@@ -300,6 +337,24 @@ class OuterMonitor:
             "engine_reported": result.get("reported"),
         }
         _append_jsonl(AUDIT_LOG, audit)
+
+        # Classifier second-opinion layer (LLM-based). Runs after the
+        # deterministic engine passes; catches creative injection attempts
+        # that regex misses. Fail-open on misconfiguration.
+        if self.classifier.config.enabled and result["safe"]:
+            self.qc_stats["classifier_calls"] += 1
+            clf = self.classifier.classify(model_output, agent_name,
+                                           INNER_MODEL_AWARENESS_NOTE)
+            audit["classifier"] = {
+                "safe": clf["safe"], "reason": clf["reason"],
+                "model": clf["model"],
+            }
+            if not clf["safe"]:
+                self.qc_stats["classifier_blocks"] += 1
+                result["safe"] = False
+                result["reason"] = f"Classifier blocked: {clf['reason']}"
+                result["blocked_by"] = "classifier"
+                result["sanitized_output"] = ""
 
         if self.outside_model.enabled and result["safe"]:
             review = self._review_with_outside_model("output", model_output, agent_name)
@@ -672,6 +727,7 @@ class OuterMonitor:
             "monitor_outer": self.monitor_outer,
             "outside_model": self.outside_model.to_dict(),
             "trusted_model": self.trusted_model.to_dict(),
+            "classifier": self.classifier.config.to_dict(),
             "outer_qc": dict(self.qc_stats),
             "engine": engine_stats,
         }

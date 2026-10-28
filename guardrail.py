@@ -29,6 +29,23 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple, Callable
 
+# Optional memory-safe Rust pattern scanner (Aho-Corasick, no ReDoS / buffer
+# overflows). Falls back to Python substring scan if unavailable.
+try:  # noqa: E402
+    from guardrail_rust_scanner import scan as _rust_scan
+except Exception:  # pragma: no cover - fallback only
+    _rust_scan = None
+
+
+def _rust_scan_patterns(patterns: List[str], text: str) -> Optional[Dict[str, Any]]:
+    """Scan text against patterns via Rust scanner; None if unavailable."""
+    if _rust_scan is None:
+        return None
+    try:
+        return _rust_scan(patterns, text)
+    except Exception:
+        return None
+
 # ── Paths ──────────────────────────────────────────────────────────────────
 # Resolve relative to this file so the engine works from any cwd / inside Docker.
 ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -411,11 +428,17 @@ class GuardrailEngine:
         return True, text, "Canonicalization passed"
 
     def _check_input_patterns(self, text: str, policy: GuardrailPolicy) -> Tuple[bool, str, str]:
+        patterns = list(policy.get("blocked_input_patterns", []) or [])
+        rust = _rust_scan_patterns(patterns, text)
+        if rust is not None:
+            if rust["matched"]:
+                return False, "", f"Blocked input pattern: {rust['pattern']}"
+            return True, text, "Input pattern check passed (rust)"
         text_lower = text.lower()
-        for pattern in policy.get("blocked_input_patterns", []):
+        for pattern in patterns:
             if pattern.lower() in text_lower:
                 return False, "", f"Blocked input pattern: {pattern}"
-        for keyword in policy.get("blocked_input_keywords", []):
+        for keyword in list(policy.get("blocked_input_keywords", []) or []):
             if keyword.lower() in text_lower:
                 return False, "", f"Blocked input keyword: {keyword}"
         return True, text, "Input pattern check passed"
@@ -427,11 +450,17 @@ class GuardrailEngine:
         return True, text, "Input length check passed"
 
     def _check_output_patterns(self, text: str, policy: GuardrailPolicy) -> Tuple[bool, str, str]:
+        patterns = list(policy.get("blocked_output_patterns", []) or [])
+        rust = _rust_scan_patterns(patterns, text)
+        if rust is not None:
+            if rust["matched"]:
+                return False, "", f"Blocked output pattern: {rust['pattern']}"
+            return True, text, "Output pattern check passed (rust)"
         text_lower = text.lower()
-        for pattern in policy.get("blocked_output_patterns", []):
+        for pattern in patterns:
             if pattern.lower() in text_lower:
                 return False, "", f"Blocked output pattern: {pattern}"
-        for keyword in policy.get("blocked_output_keywords", []):
+        for keyword in list(policy.get("blocked_output_keywords", []) or []):
             if keyword.lower() in text_lower:
                 return False, "", f"Blocked output keyword: {keyword}"
         return True, text, "Output pattern check passed"
@@ -444,8 +473,14 @@ class GuardrailEngine:
         return True, text, "Output length check passed"
 
     def _check_harmful_content(self, text: str, policy: GuardrailPolicy) -> Tuple[bool, str, str]:
+        patterns = list(policy.get("harmful_content_patterns", []) or [])
+        rust = _rust_scan_patterns(patterns, text)
+        if rust is not None:
+            if rust["matched"]:
+                return False, "", f"Harmful content detected and reported: {rust['pattern']}"
+            return True, text, "Harmful content check passed (rust)"
         text_lower = text.lower()
-        for pattern in policy.get("harmful_content_patterns", []):
+        for pattern in patterns:
             if pattern.lower() in text_lower:
                 return False, "", f"Harmful content detected and reported: {pattern}"
         return True, text, "Harmful content check passed"

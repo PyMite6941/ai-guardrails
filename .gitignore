@@ -19,6 +19,7 @@ logs/kill-switch.log
 
 # Personal runtime config (per-host, not committed)
 .ai_guardrails_config.json
+.ai_guardrails_mode.json
 
 # Node
 node_modules/
@@ -28,3 +29,10 @@ npm-debug.log*
 # OS
 .DS_Store
 Thumbs.db
+
+# Rust build artifacts
+rust/target/
+
+# Server runtime
+logs/guardrail_server.pid
+logs/guardrail_server.run.log

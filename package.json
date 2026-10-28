@@ -31,6 +31,13 @@
     "guardrail_risk.py",
     "guardrail_integrity.py",
     "guardrail_testing.py",
+    "guardrail_classifier.py",
+    "guardrail_step_monitor.py",
+    "guardrail_rust_scanner.py",
+    "rust/",
+    "scripts/install.sh",
+    "scripts/run.sh",
+    "scripts/stop.sh",
     "policies/",
     "docker/",
     "tmux/"
