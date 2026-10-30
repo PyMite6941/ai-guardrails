@@ -197,6 +197,18 @@ AGENT_TOOLS: Dict[str, Dict[str, Any]] = {
             "required": [],
         },
     },
+    "file_write": {
+        "name": "file_write",
+        "description": "Write content to a file within the project directory (read + write guarded).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path to write (within project dir)"},
+                "content": {"type": "string", "description": "File content to write"},
+            },
+            "required": ["path", "content"],
+        },
+    },
 }
 
 
@@ -416,6 +428,48 @@ def execute_agent_tool(tool_name: str, arguments: Dict[str, Any],
                         "note": "Binary file, shown as hex (first 5000 bytes)"}
             return {"content": content, "path": resolved, "size": size}
 
+        elif tool_name == "file_write":
+            file_path = args.get("path", "")
+            content = args.get("content", "")
+            # Validate path — only allow within project dir
+            project_dir = os.path.dirname(os.path.abspath(__file__))
+            resolved = os.path.realpath(file_path)
+            if not resolved.startswith(os.path.realpath(project_dir)):
+                return {"error": "File write restricted to project directory"}
+            # Validate content through guardrails (fast, deterministic)
+            file_validation = engine.validate_input(
+                content, page_id="file-write", agent_name="agent"
+            )
+            if not file_validation["safe"]:
+                return {
+                    "blocked": True,
+                    "reason": file_validation["reason"],
+                    "blocked_by": file_validation["blocked_by"],
+                }
+            # Also validate the file path itself
+            path_validation = engine.validate_input(
+                file_path, page_id="file-write-path", agent_name="agent"
+            )
+            if not path_validation["safe"]:
+                return {
+                    "blocked": True,
+                    "reason": path_validation["reason"],
+                    "blocked_by": path_validation["blocked_by"],
+                }
+            # Write the file
+            try:
+                os.makedirs(os.path.dirname(resolved), exist_ok=True)
+                with open(resolved, "w", encoding="utf-8") as f:
+                    f.write(content)
+            except Exception as e:
+                return {"error": f"Failed to write file: {str(e)}"}
+            return {
+                "ok": True,
+                "path": resolved,
+                "bytes_written": len(content.encode("utf-8")),
+                "message": f"File written: {resolved}",
+            }
+
         elif tool_name == "system_info":
             import platform
             return {
@@ -531,6 +585,35 @@ def agentic_plan_and_act(user_text: str, session: ChatSession,
 
     trace.append({"step": "plan", "tool": tool_name, "args": tool_args})
 
+    # Step 2.5: Thought-process validation — validate the agent's reasoning
+    # before acting. This is fast (deterministic regex, no LLM call).
+    thought_text = f"Agent {agent_name} plans to use tool '{tool_name}' with args {json.dumps(tool_args)} for user request: {user_text[:200]}"
+    thought_validation = monitor.validate_thought(
+        agent_name="agent", thought=thought_text, page_id="chat-agent-thought"
+    )
+    trace.append({"step": "thought_validation", "result": thought_validation})
+    if not thought_validation["safe"]:
+        # Block the action if the thought itself is malicious
+        response = (f"I cannot proceed with that action. "
+                    f"The planned tool use was flagged: "
+                    f"{thought_validation['reason']}")
+        output_validation = engine.validate_output(
+            response, page_id="chat-agent", agent_name="assistant"
+        )
+        trace.append({"step": "output_validation", "result": output_validation})
+        session.add_message("assistant", response,
+                            tool_calls=[{"name": tool_name,
+                                         "arguments": tool_args}],
+                            tool_results=[{"blocked": True,
+                                           "reason": thought_validation["reason"]}])
+        session.save()
+        return {
+            "response": response,
+            "safe": False,
+            "blocked_by": thought_validation.get("blocked_by"),
+            "trace": trace,
+        }
+
     # Step 3: Act — execute tool if selected
     tool_result: Optional[Dict[str, Any]] = None
     if tool_name != "none":
@@ -569,6 +652,14 @@ def agentic_plan_and_act(user_text: str, session: ChatSession,
             response = f"System info:\n{json.dumps(tool_result, indent=2)}"
         elif tool_name == "emergency_contain":
             response = f"Emergency containment: {tool_result.get('message', '')}"
+        elif tool_name == "file_write":
+            if tool_result.get("blocked"):
+                response = (f"File write blocked: {tool_result.get('reason', '')}")
+            elif tool_result.get("ok"):
+                response = (f"File written: {tool_result['path']} "
+                            f"({tool_result['bytes_written']} bytes)")
+            else:
+                response = f"File write error: {tool_result.get('error', '')}"
         else:
             response = f"Tool result: {json.dumps(tool_result, indent=2)}"
     else:
@@ -1778,6 +1869,38 @@ class Handler(BaseHTTPRequestHandler):
                                                  page),
                            cors_headers,
                            session_token=result.session_token)
+            return
+        # ── Thought-process validation (fast, deterministic) ─────────
+        if path == "/api/monitor/validate/thought":
+            try:
+                body = json.loads(self._read_body() or b"{}")
+            except json.JSONDecodeError:
+                _json_response(self, 400, {"error": "invalid json"},
+                               cors_headers)
+                return
+            agent_name = body.get("agent", "agent")
+            thought = body.get("thought", "")
+            page = body.get("page", "default")
+            result = monitor.validate_thought(agent_name, thought, page)
+            _json_response(self, 200 if result["safe"] else 400, result,
+                           cors_headers)
+            return
+        # ── File-change validation (fast, deterministic) ─────────────
+        if path == "/api/monitor/validate/file_change":
+            try:
+                body = json.loads(self._read_body() or b"{}")
+            except json.JSONDecodeError:
+                _json_response(self, 400, {"error": "invalid json"},
+                               cors_headers)
+                return
+            file_path = body.get("path", "")
+            content = body.get("content", "")
+            agent_name = body.get("agent", "agent")
+            page = body.get("page", "default")
+            result = monitor.validate_file_change(file_path, content,
+                                                  agent_name, page)
+            _json_response(self, 200 if result["safe"] else 400, result,
+                           cors_headers)
             return
         _json_response(self, 404, {"error": "not found"}, cors_headers)
 
