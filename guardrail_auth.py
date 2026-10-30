@@ -881,6 +881,8 @@ ROUTE_POLICY = [
     (r"^/api/chat/message$",                     {"POST"}, "validate"),
     (r"^/api/chat/tools$",                       {"GET"}, "validate"),
     (r"^/api/monitor/validate/(input|output)$",  {"POST"}, "validate"),
+    (r"^/api/monitor/validate/thought$",         {"POST"}, "validate"),
+    (r"^/api/monitor/validate/file_change$",     {"POST"}, "validate"),
     (r"^/api/monitor/(thought|action)$",         {"POST"}, "validate"),
 
     # Read-only observability
