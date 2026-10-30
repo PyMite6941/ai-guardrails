@@ -271,14 +271,16 @@ class IntegrityWatcher:
                         continue
                     entry = json.loads(line)
                     stored_hash = entry.pop("hash", None)
-                    entry.pop("prev_hash", None)
+                    entry_prev_hash = entry.pop("prev_hash", None)
                     payload = json.dumps(entry, sort_keys=True)
                     computed = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-                    # We stored hash of the full entry including prev_hash;
-                    # reconstruct to verify chain linkage.
-                    if prev_hash is not None:
-                        # entry's prev_hash should equal previous entry's hash
-                        pass
+                    # Verify the entry's own hash matches its content.
+                    if not hmac.compare_digest(computed, stored_hash or ""):
+                        return False
+                    # Verify chain linkage: this entry's prev_hash must equal
+                    # the previous entry's hash.
+                    if prev_hash is not None and entry_prev_hash != prev_hash:
+                        return False
                     prev_hash = stored_hash
         except Exception:
             return False

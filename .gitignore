@@ -41,3 +41,8 @@ rust/target/
 # Server runtime
 logs/guardrail_server.pid
 logs/guardrail_server.run.log
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec

@@ -40,6 +40,16 @@ from guardrail_risk import get_tracker
 from guardrail_classifier import GuardrailClassifier, ClassifierConfig
 from guardrail_human_loop import HumanLoopEscalator, HumanLoopConfig
 
+
+def _env(name: str, default: str = "") -> str:
+    """Read an env var, accepting the documented GUARDRAIL_ prefix too.
+
+    .env.example documents GUARDRAIL_CLASSIFIER_* / GUARDRAIL_TRUSTED_MODEL_*,
+    while older code read the bare names. Both work, so following either
+    document actually configures the model layer.
+    """
+    return os.environ.get("GUARDRAIL_" + name, os.environ.get(name, default))
+
 LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 AUDIT_LOG = os.path.join(LOGS_DIR, "outer_monitor_audit.jsonl")
 OUTER_REVIEW_LOG = os.path.join(LOGS_DIR, "outer_model_reviews.jsonl")
@@ -154,28 +164,31 @@ class OuterMonitor:
         #   TRUSTED_MODEL_MODEL=trusted-model
         #   TRUSTED_MODEL_ENDPOINT=chat
         self.trusted_model = TrustedModelConfig({
-            "enabled": os.environ.get("TRUSTED_MODEL_ENABLED", "0") == "1",
-            "base_url": os.environ.get("TRUSTED_MODEL_BASE_URL",
-                                       "http://localhost:8000").rstrip("/"),
-            "model": os.environ.get("TRUSTED_MODEL_MODEL", "trusted-model"),
-            "endpoint": os.environ.get("TRUSTED_MODEL_ENDPOINT", "chat"),
-            "timeout": int(os.environ.get("TRUSTED_MODEL_TIMEOUT", "30")),
+            "enabled": _env("TRUSTED_MODEL_ENABLED", "0") == "1",
+            "base_url": _env("TRUSTED_MODEL_BASE_URL",
+                             "http://localhost:8000").rstrip("/"),
+            "model": _env("TRUSTED_MODEL_MODEL", "trusted-model"),
+            "endpoint": _env("TRUSTED_MODEL_ENDPOINT", "chat"),
+            "timeout": int(_env("TRUSTED_MODEL_TIMEOUT", "30")),
+            "api_key": _env("TRUSTED_MODEL_API_KEY", ""),
         })
 
-        # LLM-based classifier second-opinion layer (regex + classifier =
-        # ~94% catch / ~1.1% FP per Kalvium Labs research). Runs after the
-        # deterministic engine passes. Configured via env:
+        # LLM-based classifier second-opinion layer. Runs after the
+        # deterministic engine passes, and can only escalate (never release)
+        # a decision. Configured via env:
         #   CLASSIFIER_ENABLED=1
-        #   CLASSIFIER_BASE_URL=http://localhost:8000
-        #   CLASSIFIER_MODEL=classifier-model
-        #   CLASSIFIER_ENDPOINT=chat
+        #   CLASSIFIER_BASE_URL=https://api.tokenfactory.nebius.com/v1
+        #   CLASSIFIER_MODEL=<nemotron model id>
+        #   CLASSIFIER_API_KEY=<nebius token>
+        #   CLASSIFIER_API_STYLE=auto|openai|ollama
         self.classifier = GuardrailClassifier(ClassifierConfig({
-            "enabled": os.environ.get("CLASSIFIER_ENABLED", "0") == "1",
-            "base_url": os.environ.get("CLASSIFIER_BASE_URL",
-                                       "http://localhost:8000").rstrip("/"),
-            "model": os.environ.get("CLASSIFIER_MODEL", "classifier-model"),
-            "endpoint": os.environ.get("CLASSIFIER_ENDPOINT", "chat"),
-            "timeout": int(os.environ.get("CLASSIFIER_TIMEOUT", "20")),
+            "enabled": _env("CLASSIFIER_ENABLED", "0") == "1",
+            "base_url": _env("CLASSIFIER_BASE_URL", "http://localhost:8000").rstrip("/"),
+            "model": _env("CLASSIFIER_MODEL", "classifier-model"),
+            "endpoint": _env("CLASSIFIER_ENDPOINT", "chat"),
+            "api_style": _env("CLASSIFIER_API_STYLE", "auto"),
+            "api_key": _env("CLASSIFIER_API_KEY", ""),
+            "timeout": int(_env("CLASSIFIER_TIMEOUT", "20")),
         }))
 
         # Human-in-the-loop escalation for risky conversations (medium+ risk
@@ -284,12 +297,15 @@ class OuterMonitor:
                 result["sanitized_input"] = ""
 
         # Trusted model audits the outer monitor's review (bootstrapped monitoring).
-        # If the trusted model flags the review as rubber-stamping/collusion,
-        # treat the decision as suspect and block.
-        if self.outside_model.enabled and result["safe"] is False \
-                and result.get("blocked_by") == "outside_model":
+        # Audits both approve and block decisions: rubber-stamping (approving
+        # harmful content) is just as dangerous as an incorrect block.
+        # Skip when the outside model was unreachable (fail-open): there's no
+        # real review to audit.
+        outside_review = audit.get("outside_review", {})
+        if (self.outside_model.enabled and outside_review
+                and "unreachable" not in outside_review.get("reason", "")):
             trusted = self._audit_with_trusted_model(
-                "input", user_input, agent_name, audit.get("outside_review", {}))
+                "input", user_input, agent_name, outside_review)
             audit["trusted_audit"] = trusted
             self.qc_stats["trusted_audits"] += 1
             if trusted.get("flagged", True):
@@ -423,11 +439,15 @@ class OuterMonitor:
                 result["sanitized_output"] = ""
 
         # Trusted model audits the outer monitor's review (bootstrapped monitoring).
-        if self.outside_model.enabled and result["safe"] is False \
-                and result.get("blocked_by") == "outside_model":
+        # Audits both approve and block decisions: rubber-stamping (approving
+        # harmful content) is just as dangerous as an incorrect block.
+        # Skip when the outside model was unreachable (fail-open): there's no
+        # real review to audit.
+        outside_review = audit.get("outside_review", {})
+        if (self.outside_model.enabled and outside_review
+                and "unreachable" not in outside_review.get("reason", "")):
             trusted = self._audit_with_trusted_model(
-                "output", model_output, agent_name,
-                audit.get("outside_review", {}))
+                "output", model_output, agent_name, outside_review)
             audit["trusted_audit"] = trusted
             self.qc_stats["trusted_audits"] += 1
             if trusted.get("flagged", True):
@@ -567,7 +587,100 @@ class OuterMonitor:
 
         return entry
 
-    # ── Outside model review ──────────────────────────────────────────────
+    # ── Fast thought-process validation (deterministic, no LLM calls) ─────
+    def validate_thought(self, agent_name: str, thought: str,
+                         page_id: str = "default") -> Dict[str, Any]:
+        """Validate an inner-AI thought through fast deterministic guardrail
+        checks before it is acted upon.
+
+        Scans for: jailbreak attempts, container breakout, harmful content,
+        data exfiltration, prompt injection, and system prompt leakage.
+        All checks are regex-based (fast — no LLM round-trip).
+        """
+        result = self.engine.validate_input(
+            thought, page_id=page_id, agent_name=agent_name
+        )
+        # Audit the thought
+        audit = {
+            "timestamp": _now(),
+            "session": self.session_id,
+            "kind": "thought_validation",
+            "page": page_id,
+            "agent": agent_name,
+            "content_preview": thought[:200],
+            "safe": result["safe"],
+            "reason": result["reason"],
+            "blocked_by": result.get("blocked_by"),
+        }
+        _append_jsonl(AUDIT_LOG, audit)
+        return {
+            "safe": result["safe"],
+            "reason": result["reason"],
+            "blocked_by": result.get("blocked_by"),
+            "censored": result.get("censored", False),
+            "audit": audit,
+        }
+
+    # ── Fast file-change validation (deterministic, no LLM calls) ─────────
+    def validate_file_change(self, file_path: str, content: str,
+                             agent_name: str = "agent",
+                             page_id: str = "default") -> Dict[str, Any]:
+        """Validate a file write before it happens.
+
+        Checks:
+          - Path traversal / project-directory confinement
+          - Content scanned for malware, backdoors, reverse shells,
+            credential exfiltration, and other malicious patterns
+        All checks are deterministic regex — fast and fail-closed.
+        """
+        # Path validation
+        # Fast path-traversal check: reject any path containing ..
+        if ".." in file_path.split("/"):
+            return {
+                "safe": False,
+                "reason": "Path blocked: path traversal (..) detected",
+                "blocked_by": "path_traversal",
+            }
+
+        path_check = self.engine.validate_input(
+            file_path, page_id=f"{page_id}-path", agent_name=agent_name
+        )
+        if not path_check["safe"]:
+            return {
+                "safe": False,
+                "reason": f"Path blocked: {path_check['reason']}",
+                "blocked_by": path_check.get("blocked_by"),
+            }
+
+        # Content validation
+        content_check = self.engine.validate_input(
+            content, page_id=page_id, agent_name=agent_name
+        )
+        if not content_check["safe"]:
+            return {
+                "safe": False,
+                "reason": f"Content blocked: {content_check['reason']}",
+                "blocked_by": content_check.get("blocked_by"),
+                "censored": content_check.get("censored", False),
+            }
+
+        audit = {
+            "timestamp": _now(),
+            "session": self.session_id,
+            "kind": "file_change_validation",
+            "page": page_id,
+            "agent": agent_name,
+            "path": file_path,
+            "content_preview": content[:200],
+            "safe": True,
+        }
+        _append_jsonl(AUDIT_LOG, audit)
+        return {
+            "safe": True,
+            "reason": "File change passed all guardrail checks",
+            "blocked_by": None,
+            "audit": audit,
+        }
 
     def _review_with_outside_model(
         self, kind: str, content: str, agent_name: str

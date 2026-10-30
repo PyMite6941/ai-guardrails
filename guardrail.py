@@ -675,7 +675,7 @@ class GuardrailEngine:
         for check_name in policy.get("checks", []):
             if not self._check_enabled(check_name):
                 continue
-            if check_name.startswith("output_"):
+            if check_name.startswith("output_") or check_name == "disclaimers":
                 continue  # output-only checks don't apply to input
             check = self.checks.get(check_name)
             if not check:
@@ -705,8 +705,13 @@ class GuardrailEngine:
         return result
 
     def validate_output(self, model_output: str, page_id: str = "default",
-                        agent_name: str = "assistant") -> Dict[str, Any]:
-        """Validate + sanitize model output against a page policy."""
+                        agent_name: str = "assistant",
+                        trigger_kill_switch: bool = True) -> Dict[str, Any]:
+        """Validate + sanitize model output against a page policy.
+
+        trigger_kill_switch: when False (TRAINING mode), critical failures
+            are recorded but the kill switch script is not invoked.
+        """
         self.qc_stats["total"] += 1
         self.qc_stats["by_page"][page_id] = self.qc_stats["by_page"].get(page_id, 0) + 1
         result = {
@@ -743,7 +748,7 @@ class GuardrailEngine:
                     result["reported"] = True
                 critical = ("harmful_content", "pii_credentials",
                             "data_exfiltration", "system_prompt_leakage")
-                if check_name in critical:
+                if check_name in critical and trigger_kill_switch:
                     self._trigger_kill_switch(reason, agent_name, current)
                 self._log_event(page_id, check_name, reason, agent_name,
                                 current[:200])

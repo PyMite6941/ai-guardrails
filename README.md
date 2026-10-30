@@ -12,6 +12,46 @@ Customizable per-web-page input/output guardrails for LLM applications. Clyde-in
 - **Stats + audit log** — per-check and per-page counters, JSONL event log in `logs/`.
 - **Kill switch** — triggers `scripts/kill-switch.sh` on critical containment failure.
 
+## Model oversight on Nebius Token Factory (NVIDIA Nemotron)
+
+The deterministic engine decides everything by default. On top of it there is an
+optional **second opinion**: after every check passes, an LLM classifier reads the
+text and may escalate the verdict. It can only add a block — it can never release
+one, because the engine's result is already final by the time the model is called.
+
+It runs on [Nebius Token Factory](https://nebius.com/services/token-factory) with
+an NVIDIA open model (Nemotron), over the OpenAI-compatible endpoint
+`POST https://api.tokenfactory.nebius.com/v1/chat/completions`.
+
+**Enable it** (key stays in `.env`, which is git-ignored):
+
+```
+GUARDRAIL_CLASSIFIER_ENABLED=1
+GUARDRAIL_CLASSIFIER_BASE_URL=https://api.tokenfactory.nebius.com/v1
+GUARDRAIL_CLASSIFIER_MODEL=nvidia/Nemotron-3.5-Super-VL
+GUARDRAIL_CLASSIFIER_API_STYLE=openai
+GUARDRAIL_CLASSIFIER_API_KEY=<your Nebius token>
+```
+
+Restart the server. `/api/guardrail-status` reports `classifier.calls`,
+`classifier.blocks` and `classifier.errors`, so you can see it working.
+
+**Measure what the model actually adds** before trusting it:
+
+```
+python3 harness/nemotron_probe.py --self-test          # plumbing check, no key
+python3 harness/nemotron_probe.py --model <model-id>   # live run against Nebius
+```
+
+It scores the same labelled corpus three ways — deterministic only, Nemotron only,
+and both together — and writes precision/recall/F1, latency and the list of cases
+the model rescued or broke to `harness/results/`.
+
+**Limits, stated plainly:** the classifier is off by default; on a network or auth
+failure it fails **open** (the deterministic verdict stands) and increments
+`classifier.errors`; it sees at most 2,000 characters per call; and it costs one
+inference per passing request, which is why it is not enabled on every deployment.
+
 ## Management
 
 **tmux** (survives SSH disconnects):
@@ -418,12 +458,19 @@ AI Guardrails
 
 **Tagline (one sentence)**
 ```
-Containerized per-web-page input/output guardrails with outer-monitor oversight, container breakout detection, and ephemeral per-conversation cages — offline-first and Raspberry Pi ready.
+Containerized per-web-page input/output guardrails for LLM apps — deterministic rules, with an NVIDIA Nemotron second opinion on Nebius Token Factory.
+```
+
+**Track**
+```
+Coding & Agentic Engineering
 ```
 
 **Description / What it does**
 ```
 AI Guardrails is a Clyde-inspired, executable-code guardrail system for LLM applications. It sits between the user and an AI model (inner AI) and validates every input/output before it reaches the model or the user, with an optional outer oversight model that reviews the inner AI's thoughts and actions.
+
+Built on Nebius: the optional second-opinion classifier calls an NVIDIA Nemotron model through Nebius Token Factory's OpenAI-compatible endpoint at runtime (`POST /v1/chat/completions`). The model runs *after* the deterministic engine and can only escalate a verdict to BLOCK — it can never release something the rules already stopped, so a model failure or a prompt-injected model cannot open the gate.
 
 Key capabilities:
 - Input guardrail: canonicalizes (zero-width/homoglyph + NFKC), blocks jailbreak/container-escape/network patterns and keywords, enforces max length.
@@ -465,7 +512,8 @@ Key capabilities:
 
 **What's next**
 ```
-- LLM-based classifier second opinion (wired in, disabled by default; enable with CLASSIFIER_ENABLED=1).
+- LLM-based classifier second opinion on Nebius Token Factory with NVIDIA Nemotron (wired in and validated against a mock endpoint; enable with GUARDRAIL_CLASSIFIER_ENABLED=1 and a Nebius key).
+- Tiered Nemotron use: Nano/Super for the per-request second opinion, Ultra for multi-turn forensic review.
 - Streaming reasoning-step monitor with interrupt on unsafe step.
 - Additional per-page policies and model integrations.
 - Packaging as a pip-installable Python package alongside the npm package.
