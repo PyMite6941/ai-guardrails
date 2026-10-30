@@ -848,6 +848,12 @@ ROUTE_POLICY = [
 
     # Validation + monitor submissions
     (r"^/api/validate/(input|output)$",          {"POST"}, "validate"),
+    # Agentic chat harness (web/chat.html) — developer-level, not public:
+    # it can start chats and drive tool calls.
+    (r"^/api/chat/sessions$",                    {"GET", "POST"}, "validate"),
+    (r"^/api/chat/sessions/[^/]+$",              {"GET", "DELETE"}, "validate"),
+    (r"^/api/chat/message$",                     {"POST"}, "validate"),
+    (r"^/api/chat/tools$",                       {"GET"}, "validate"),
     (r"^/api/monitor/validate/(input|output)$",  {"POST"}, "validate"),
     (r"^/api/monitor/(thought|action)$",         {"POST"}, "validate"),
 
