@@ -39,6 +39,72 @@ from outer_monitor import get_monitor
 
 logger = get_logger("assistant")
 
+# ── Assistant Scope Enforcement ───────────────────────────────────────────
+# The AI assistant is restricted to SUPPORT AND MAINTENANCE tasks only.
+# It MUST NOT provide programming, code generation, file execution,
+# package installation, or arbitrary system modification.
+#
+# Allowed operations (support/maintenance of the guardrail system):
+#   - setup_status, setup_password, setup_2fa, setup_model_provider
+#   - list_policies, get_policy, save_policy
+#   - get_activity, get_audit_detail, get_risk_summary
+#   - get_health
+#   - emergency_contain, emergency_shutdown, emergency_all, emergency_reenable
+#
+# Blocked (programming / out of scope):
+#   - code generation, code execution, script running (beyond emergency-override.sh)
+#   - file writing/deletion outside logs/ and policies/
+#   - package installation (pip, npm, apt, etc.)
+#   - arbitrary shell commands
+#   - system configuration outside guardrail scope
+#=============================================================================
+
+ASSISTANT_ALLOWED_ACTIONS: set[str] = {
+    "setup_status",
+    "setup_password",
+    "setup_2fa",
+    "setup_model_provider",
+    "list_policies",
+    "get_policy",
+    "save_policy",
+    "get_activity",
+    "get_audit_detail",
+    "get_risk_summary",
+    "get_health",
+    "emergency_contain",
+    "emergency_shutdown",
+    "emergency_all",
+    "emergency_reenable",
+}
+
+ASSISTANT_SCOPE_NOTICE = (
+    "This AI assistant is restricted to support and maintenance of the "
+    "AI Guardrails system only. It cannot generate code, execute programs, "
+    "install packages, or perform arbitrary system administration."
+)
+
+
+def _check_scope(action: str) -> Dict[str, Any]:
+    """Verify an assistant action is within the support/maintenance scope.
+
+    Returns {"ok": True} if allowed, or {"ok": False, "error": ...} if blocked.
+    """
+    if action not in ASSISTANT_ALLOWED_ACTIONS:
+        _append_assistant_log({
+            "action": action,
+            "ok": False,
+            "error": "out of scope: support and maintenance only",
+        })
+        return {
+            "ok": False,
+            "error": (
+                f"Action '{action}' is outside the assistant scope. "
+                + ASSISTANT_SCOPE_NOTICE
+            ),
+        }
+    return {"ok": True}
+
+
 ASSISTANT_STATE_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "logs", "assistant"
 )
