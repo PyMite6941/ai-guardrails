@@ -2,6 +2,39 @@
 
 Customizable per-web-page input/output guardrails for LLM applications. Clyde-inspired engine: guardrails are **executable code**, not just prompts.
 
+## Quickstart
+
+```
+./scripts/demo.sh                 # throwaway instance on :8083 + a developer demo account
+./scripts/demo.sh --port 8099     # or pick a port
+```
+
+Open `http://127.0.0.1:8083/` — sign in with the account written to
+`~/.ai_guardrails_demo_credentials.txt` (mode 600). Nothing real is touched: users,
+keys and logs live in `/tmp/ag-demo`.
+
+For a real local instance:
+
+```
+GUARDRAIL_ADMIN_PASSWORD='<a strong password>' python3 guardrail_server.py
+```
+
+Docs: [ARCHITECTURE](docs/ARCHITECTURE.md) · [DEMO](docs/DEMO.md) · [SUBMISSION](docs/SUBMISSION.md)
+
+## How a decision is made
+
+Three layers, in this order, and only this order:
+
+1. **Rules** — `guardrail.py`, 13 deterministic checks per page. The first failure
+   decides the verdict and names the rule (`blocked_by`); nothing after it runs.
+2. **Oversight** — `outer_monitor.py`. An optional Nemotron classifier may escalate
+   an ALLOW into a BLOCK. It cannot release a block, so a broken or offline model
+   degrades to "rules only", never to "no rules". Two further optional slots watch
+   the agent's thoughts and audit the monitor itself.
+3. **Gateway** — `guardrail_server.py`. One entry point for every request:
+   default-deny route table, per-endpoint permission, sessions or API keys, CSRF,
+   host allowlist, rate limit.
+
 ## What it does
 
 - **Input guardrail** — canonicalizes (zero-width/homoglyph + NFKC), blocks jailbreak/container-escape/network patterns & keywords, enforces max length.
@@ -421,9 +454,28 @@ Evasion-resistant detection that strips Unicode smuggling, normalizes (NFKC), de
 
 Embeds canary tokens into internal prompts/context so any leakage of internal text is detectable in model output. Scans model output for canary tokens, system-prompt leakage, credentials/secrets, and outbound exfiltration URLs. Uses canary tokens + Unicode stripping + NFKC + casefold (AWS Bedrock guidance). Fail-closed — anything suspicious is blocked and censored.
 
-## Web config UI
+## Console, chat, and access control
 
-Open `http://localhost:8083/` to edit any page's policy live (patterns, keywords, disclaimers, limits, checks) and test validation in real time. Save writes to `policies/pages/<page>.json`; download JSON for offline deploys.
+**Console** — `http://localhost:8083/`, a single self-contained page: sign-in, per-page
+policy editor (patterns, keywords, disclaimers, limits, enabled checks), test bench,
+monitoring, model providers, users, API keys, staged emergency override, dark/light.
+
+**Agentic chat harness** — `http://localhost:8083/chat`: conversations that run tools
+through the same guardrail, with thought validation and file-change validation before
+anything executes.
+
+**Access control** — three roles enforced on the server, never by hiding buttons:
+
+| role | can |
+|---|---|
+| admin | everything, including policies, users, keys, emergency containment |
+| developer | read policies, run validations, use the chat harness |
+| viewer | read the dashboard and logs |
+
+Each account has its own password (PBKDF2), its own TOTP device with single-use backup
+codes, and its own sessions. API keys are separate from logins, scoped to a role,
+stored only as hashes, and can be revoked or rotated. Routing is default-deny: an
+endpoint with no explicit policy returns 403 rather than becoming world-readable.
 
 ## npm package
 
@@ -440,19 +492,27 @@ Standalone (no server) client-side rules are included.
 
 ## Tests
 
+Eleven suites, all stdlib, all runnable at once:
+
 ```
-python3 tests/test_guardrail.py   # guardrail engine checks (23)
-python3 tests/test_outer_monitor.py   # outer monitor + bootstrapped monitoring checks
-python3 tests/test_cage_breakout.py   # cage breakout-strategy checks (26 strategies)
-python3 tests/test_new_modules.py     # modes, risk, integrity checks
-python3 tests/test_classifier_step.py # classifier, step monitor, rust scanner checks
-python3 tests/test_human_loop.py      # human-in-the-loop escalation checks
-python3 tests/test_canary.py          # liveness canary checks
-python3 tests/test_hardening.py       # hardware, updates, prompt injection, leakage checks
-python3 tests/test_auth.py            # authentication, authorization, rate limiting
-python3 guardrail_testing.py          # adversarial suite: catch rate + FP rate
-./scripts/setup.sh                # chmod + self-test + usage hints
+for t in tests/*.py; do python3 "$t" || echo "FAILED $t"; done
 ```
+
+| suite | covers |
+|---|---|
+| `test_guardrail.py` | engine checks, per-page policies |
+| `test_outer_monitor.py` | oversight, bootstrapped monitoring |
+| `test_cage_breakout.py` | 26 breakout strategies |
+| `test_new_modules.py` | modes, risk, integrity |
+| `test_classifier_step.py` | classifier parsing, step monitor, Rust scanner |
+| `test_human_loop.py` | escalation paths |
+| `test_canary.py` | liveness canary |
+| `test_hardening.py` | hardware, updates, prompt injection, leakage |
+| `test_auth.py` | auth, rate limiting, host validation, CSRF |
+| `test_security.py` | default-deny, per-user 2FA, backup-code hashing, roles, API keys |
+| `test_classifier_e2e.py` | the model layer actually runs on `/api/validate`: mock endpoint in place of Nebius, escalate-only behaviour, bearer key delivery, counter accuracy |
+
+`python3 guardrail_testing.py` runs the adversarial suite (catch rate + false-positive rate).
 
 ## DevPost submission guide (copy-paste ready)
 
@@ -499,11 +559,11 @@ Key capabilities:
 - Python 3 stdlib-only guardrail engine (guardrail.py) with per-page JSON policies, pluggable checks, kill switch, stats, and JSONL audit logging.
 - HTTP API server (guardrail_server.py) with /api/validate/* and /api/monitor/* endpoints plus a /api/guardrail-status consolidated health endpoint.
 - Node.js client embed (@pymite6941/ai-guardrails on npm) with standalone fallback rules.
-- Web config UI (web/index.html + web/config.js) for live policy editing and testing.
+- Single-file console (web/index.html) for live policy editing and testing, plus an agentic chat harness (web/chat.html + chat.js) that runs tools through the same guardrail.
 - Rust Aho-Corasick pattern scanner (rust/src/main.rs) for memory-safe, ReDoS-proof hot-path matching with Python fallback.
 - Docker: containerized model server (docker/model_server.py), hardened compose stack (inner model :8000 + outside monitor :8001), ephemeral cage runner (docker/run_cage.sh).
-- Additional modules: guardrail_modes.py, guardrail_risk.py, guardrail_integrity.py, guardrail_testing.py, guardrail_classifier.py, guardrail_step_monitor.py, guardrail_policy_versioning.py, guardrail_human_loop.py, guardrail_canary.py, guardrail_prompt_injection.py, guardrail_leakage.py, guardrail_hardware.py, guardrail_updates.py.
-- 8 test suites (guardrail engine, outer monitor, cage breakout, modes/risk/integrity, classifier/step/scanner, human loop, canary, hardening) plus an adversarial suite: 100% catch rate, 0% false positives.
+- Additional modules: guardrail_modes.py, guardrail_risk.py, guardrail_integrity.py, guardrail_testing.py, guardrail_classifier.py, guardrail_step_monitor.py, guardrail_policy_versioning.py, guardrail_human_loop.py, guardrail_canary.py, guardrail_prompt_injection.py, guardrail_leakage.py, guardrail_hardware.py, guardrail_updates.py, guardrail_users.py (accounts, roles, TOTP, API keys), guardrail_models.py (model providers), guardrail_assistant.py, guardrail_secret_stripper.py, guardrail_token_compressor.py.
+- 11 test suites (engine, oversight, cage breakout, modes/risk/integrity, classifier/step/scanner, human loop, canary, hardening, auth, security, model-layer end-to-end) plus an adversarial suite: 100% catch rate, 0% false positives. `test_classifier_e2e.py` stands a mock OpenAI-compatible endpoint in place of Nebius and proves the model layer is really consulted on the validation path.
 - Dev environment: Raspberry Pi (aarch64), offline-first, no runtime network dependency.
 ```
 
