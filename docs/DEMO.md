@@ -19,19 +19,54 @@ It cannot: change policies, manage users or keys, or trigger emergency containme
 
 ## 2. Expose it
 
-Pick one, then restart with the hostname allowed:
+A domain name alone does not make the app reachable — something has to carry the
+traffic. Two workable shapes:
+
+**A. Own domain through a Cloudflare Tunnel (recommended)**
+
+No port forwarding, no exposed home IP, TLS handled for you:
 
 ```
-DEMO_HOST=<hostname> ./scripts/demo.sh --port 8099
+cloudflared tunnel login
+cloudflared tunnel create ai-guardrails-demo
+cloudflared tunnel route dns ai-guardrails-demo demo.yourdomain.com
+cloudflared tunnel run --url http://127.0.0.1:8099 ai-guardrails-demo
 ```
 
-- **cloudflared** (free, no account for a quick tunnel): `cloudflared tunnel --url http://127.0.0.1:8099` — prints a `*.trycloudflare.com` hostname.
-- **ngrok**: `ngrok http 8099` — prints a `*.ngrok-free.app` hostname.
-- **Server**: a small VM, `docker compose -f docker/docker-compose.yml up -d`, then the same tunnel or a reverse proxy with TLS.
+**B. DNS A record + port forward + a terminating proxy**
 
-`GUARDRAIL_ALLOWED_HOSTS` fails closed to loopback: if the hostname is not listed,
-every request returns 400 "invalid host header". That is the SSRF/Host-injection
-guard doing its job, not a bug.
+Point `demo.yourdomain.com` at your public IP, forward 443, and run Caddy or
+nginx in front of `127.0.0.1:8099`:
+
+```
+demo.yourdomain.com {
+    reverse_proxy 127.0.0.1:8099
+}
+```
+
+**Then start the app so it accepts that hostname and trusts the proxy:**
+
+```
+DEMO_HOST=demo.yourdomain.com \
+GUARDRAIL_TRUST_PROXY=1 \
+GUARDRAIL_RATE_LIMIT=240 \
+./scripts/demo.sh --port 8099
+```
+
+- `DEMO_HOST` adds the hostname to `GUARDRAIL_ALLOWED_HOSTS`. Without it every
+  request returns 400 "invalid host header" — the Host-injection guard, working
+  as designed.
+- `GUARDRAIL_TRUST_PROXY=1` makes rate limiting and audit logs use the real
+  client IP (`CF-Connecting-IP` / `X-Forwarded-For`) instead of the proxy's
+  127.0.0.1. **Without it, every visitor shares one 60-request/minute bucket and
+  one 5-failure login lockout — one person mistyping a password locks out the
+  judge.** Forwarded headers are only honoured from a loopback peer, so a remote
+  client cannot spoof its own IP.
+- `GUARDRAIL_RATE_LIMIT=240` is for demos only; the default 60/min is right for
+  a single operator.
+
+TLS: the app speaks plain HTTP and must never be exposed directly. Terminate TLS
+at the tunnel/proxy and make sure the browser sees `https://`.
 
 Keep the tunnel up while judging. A dead demo link reads worse than a recorded
 video, so if the tunnel is flaky, host it on a VM for the judging window.

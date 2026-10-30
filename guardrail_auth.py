@@ -70,6 +70,11 @@ BIND_HOST = os.environ.get("GUARDRAIL_BIND_HOST", "127.0.0.1")
 
 # Login-specific rate limiting (stricter than general API rate limit).
 LOGIN_RATE_LIMIT = int(os.environ.get("GUARDRAIL_LOGIN_RATE_LIMIT", "5"))
+
+# Trust X-Forwarded-For / CF-Connecting-IP from a loopback proxy (cloudflared,
+# nginx, an SSH tunnel). Without this every proxied request looks like it came
+# from 127.0.0.1: one shared rate-limit bucket and one shared login lockout.
+TRUST_PROXY = os.environ.get("GUARDRAIL_TRUST_PROXY", "0") == "1"
 LOGIN_LOCKOUT_SECONDS = int(os.environ.get("GUARDRAIL_LOGIN_LOCKOUT_SECONDS", "300"))
 LOGIN_MAX_ATTEMPTS = int(os.environ.get("GUARDRAIL_LOGIN_MAX_ATTEMPTS", "5"))
 
@@ -721,11 +726,32 @@ _login_rate_limiter = RateLimiter(LOGIN_RATE_LIMIT)
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 def _client_ip(handler) -> str:
+    """Effective client IP for rate limiting and audit logs.
+
+    Behind a tunnel or reverse proxy every request arrives from 127.0.0.1, so
+    a shared bucket would rate-limit all visitors together and a single bad
+    actor could lock judges out. With GUARDRAIL_TRUST_PROXY=1 and a loopback
+    peer, the forwarded client address is used instead. Only a loopback peer is
+    trusted, so a remote client cannot spoof its own identity.
+    """
     try:
-        host, _ = handler.client_address
-        return host
+        peer, _ = handler.client_address
     except Exception:
         return "unknown"
+    if not TRUST_PROXY:
+        return peer
+    if peer not in ("127.0.0.1", "::1"):
+        return peer
+    for header in ("CF-Connecting-IP", "X-Real-IP", "X-Forwarded-For"):
+        try:
+            value = handler.headers.get(header, "")
+        except Exception:
+            value = ""
+        if value:
+            first = value.split(",")[0].strip()
+            if first:
+                return first
+    return peer
 
 
 def _ip_allowed(ip: str) -> bool:

@@ -79,6 +79,7 @@ from guardrail_auth import (
     RATE_LIMIT, MAX_BODY_SIZE, BIND_HOST,
     _log_auth_event,
     _record_login_attempt,
+    _client_ip,
     verify_user_backup_code, enable_user_2fa, disable_user_2fa,
     enable_2fa, disable_2fa,
 )
@@ -1252,13 +1253,13 @@ class Handler(BaseHTTPRequestHandler):
                 login_ident = f"login:{self.client_address[0] if self.client_address else 'unknown'}"
                 _clear_login_attempts(login_ident)
                 # Log successful password step
-                _log_auth_event("login_password_ok", self.client_address[0] if self.client_address else "unknown",
+                _log_auth_event("login_password_ok", _client_ip(self),
                                self.headers.get("User-Agent", ""))
                 # ── 2FA step ──
                 if twofa_enabled:
                     # Issue a temporary 2fa-pending session token
                     tmp_token = create_session(
-                        self.client_address[0] if self.client_address else "unknown",
+                        _client_ip(self),
                         self.headers.get("User-Agent", ""), username, role)
                     # Mark session as 2fa-pending
                     sess = validate_session(tmp_token)
@@ -1272,7 +1273,7 @@ class Handler(BaseHTTPRequestHandler):
                         # 2FA satisfied — mark session fully authenticated
                         sess["2fa_verified"] = True
                         sess["2fa_pending"] = False
-                        _log_auth_event("login_2fa_ok", self.client_address[0] if self.client_address else "unknown",
+                        _log_auth_event("login_2fa_ok", _client_ip(self),
                                        self.headers.get("User-Agent", ""))
                         csrf = set_csrf_token(tmp_token)
                         _h = dict(cors_headers)
@@ -1295,10 +1296,10 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 else:
                     # No 2FA — full login
-                    _log_auth_event("login_success", self.client_address[0] if self.client_address else "unknown",
+                    _log_auth_event("login_success", _client_ip(self),
                                    self.headers.get("User-Agent", ""))
                     session_token = create_session(
-                        self.client_address[0] if self.client_address else "unknown",
+                        _client_ip(self),
                         self.headers.get("User-Agent", ""), username, role)
                     csrf = set_csrf_token(session_token)
                     _h = dict(cors_headers)
@@ -1313,7 +1314,7 @@ class Handler(BaseHTTPRequestHandler):
                 login_ident = f"login:{self.client_address[0] if self.client_address else 'unknown'}"
                 _record_login_attempt(login_ident, success=False)
                 # Log failed login
-                _log_auth_event("login_failure", self.client_address[0] if self.client_address else "unknown",
+                _log_auth_event("login_failure", _client_ip(self),
                                self.headers.get("User-Agent", ""), "invalid password")
                 _json_response(self, 401, {"error": "invalid password"},
                                cors_headers)
@@ -1323,7 +1324,7 @@ class Handler(BaseHTTPRequestHandler):
             session_token = self.headers.get("X-Session-Token", "") or \
                 self.headers.get("Cookie", "").replace("session=", "", 1)
             destroy_session(session_token)
-            _log_auth_event("logout", self.client_address[0] if self.client_address else "unknown",
+            _log_auth_event("logout", _client_ip(self),
                            self.headers.get("User-Agent", ""))
             _json_response(self, 200, {"ok": True,
                                        "message": "logged out"},
@@ -1354,7 +1355,7 @@ class Handler(BaseHTTPRequestHandler):
                 session["2fa_verified"] = True
                 session["2fa_pending"] = False
                 _log_auth_event("login_2fa_ok",
-                               self.client_address[0] if self.client_address else "unknown",
+                               _client_ip(self),
                                self.headers.get("User-Agent", ""))
                 csrf = set_csrf_token(session_token)
                 _h = dict(cors_headers)
@@ -1379,7 +1380,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             result = disable_2fa()
             _log_auth_event("2fa_disabled",
-                           self.client_address[0] if self.client_address else "unknown",
+                           _client_ip(self),
                            self.headers.get("User-Agent", ""))
             _json_response(self, 200, result, cors_headers)
             return
@@ -1391,7 +1392,7 @@ class Handler(BaseHTTPRequestHandler):
                 "scripts", "emergency-override.sh"), "contain"],
                            capture_output=True, text=True, timeout=30)
             _log_auth_event("emergency_contain",
-                           self.client_address[0] if self.client_address else "unknown",
+                           _client_ip(self),
                            self.headers.get("User-Agent", ""))
             _json_response(self, 200, {"ok": True,
                                        "message": "containment activated"},
@@ -1404,7 +1405,7 @@ class Handler(BaseHTTPRequestHandler):
                 "scripts", "emergency-override.sh"), "container-stop"],
                            capture_output=True, text=True, timeout=30)
             _log_auth_event("emergency_container_stop",
-                           self.client_address[0] if self.client_address else "unknown",
+                           _client_ip(self),
                            self.headers.get("User-Agent", ""))
             _json_response(self, 200, {"ok": True,
                                        "message": "containers stopped"},
@@ -1417,7 +1418,7 @@ class Handler(BaseHTTPRequestHandler):
                 "scripts", "emergency-override.sh"), "logs-preserve"],
                            capture_output=True, text=True, timeout=30)
             _log_auth_event("emergency_logs_preserve",
-                           self.client_address[0] if self.client_address else "unknown",
+                           _client_ip(self),
                            self.headers.get("User-Agent", ""))
             _json_response(self, 200, {"ok": True,
                                        "message": "logs preserved"},
@@ -1430,7 +1431,7 @@ class Handler(BaseHTTPRequestHandler):
                 "scripts", "emergency-override.sh"), "shutdown"],
                            capture_output=True, text=True, timeout=30)
             _log_auth_event("emergency_shutdown",
-                           self.client_address[0] if self.client_address else "unknown",
+                           _client_ip(self),
                            self.headers.get("User-Agent", ""))
             _json_response(self, 200, {"ok": True,
                                        "message": "full shutdown locked"},
@@ -1443,7 +1444,7 @@ class Handler(BaseHTTPRequestHandler):
                 "scripts", "emergency-override.sh"), "all"],
                            capture_output=True, text=True, timeout=30)
             _log_auth_event("emergency_all_stages",
-                           self.client_address[0] if self.client_address else "unknown",
+                           _client_ip(self),
                            self.headers.get("User-Agent", ""))
             _json_response(self, 200, {"ok": True,
                                        "message": "all emergency stages activated"},
@@ -1474,7 +1475,7 @@ class Handler(BaseHTTPRequestHandler):
                            capture_output=True, text=True, timeout=30)
             if proc.returncode == 0:
                 _log_auth_event("emergency_reenable_ok",
-                               self.client_address[0] if self.client_address else "unknown",
+                               _client_ip(self),
                                self.headers.get("User-Agent", ""))
                 _json_response(self, 200, {"ok": True,
                                            "message": "system re-enabled"},
@@ -1482,7 +1483,7 @@ class Handler(BaseHTTPRequestHandler):
                                session_token=result.session_token)
             else:
                 _log_auth_event("emergency_reenable_denied",
-                               self.client_address[0] if self.client_address else "unknown",
+                               _client_ip(self),
                                self.headers.get("User-Agent", ""),
                                detail=proc.stderr[:200])
                 _json_response(self, 403, {"ok": False,
@@ -1554,7 +1555,7 @@ class Handler(BaseHTTPRequestHandler):
             )
             provider_name = provider["name"] if provider else provider_key
             _log_auth_event("model_selected",
-                           self.client_address[0] if self.client_address else "unknown",
+                           _client_ip(self),
                            self.headers.get("User-Agent", ""),
                            detail=f"provider={provider_key}")
             _json_response(self, 200, {
@@ -1763,7 +1764,7 @@ class Handler(BaseHTTPRequestHandler):
             sanitized_text = strip_all_sensitive(text)
             if secrets_found > 0:
                 _log_auth_event("chat_secret_stripped",
-                               self.client_address[0] if self.client_address else "unknown",
+                               _client_ip(self),
                                detail=f"{secrets_found} secrets redacted")
 
             # ── Token compression for cost savings ───────────────────────
@@ -1824,7 +1825,7 @@ class Handler(BaseHTTPRequestHandler):
             assistant_secrets = count_secrets(assistant_response)
             if assistant_secrets > 0:
                 _log_auth_event("chat_response_secret_stripped",
-                               self.client_address[0] if self.client_address else "unknown",
+                               _client_ip(self),
                                detail=f"{assistant_secrets} secrets redacted from response")
             session.add_message("assistant", assistant_response)
             session.save()
@@ -1868,7 +1869,7 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as e:
                 _json_response(self, 400, {"error": str(e)}, cors_headers)
                 return
-            _log_auth_event("password_setup", self.client_address[0] if self.client_address else "unknown",
+            _log_auth_event("password_setup", _client_ip(self),
                            self.headers.get("User-Agent", ""))
             _json_response(self, 200, {"ok": True,
                                        "message": "password set successfully"},
@@ -1911,7 +1912,7 @@ class Handler(BaseHTTPRequestHandler):
                                    cors_headers)
                     return
             result = enable_user_2fa(username, replace=replace)
-            _log_auth_event("2fa_enrolled", self.client_address[0] if self.client_address else "unknown",
+            _log_auth_event("2fa_enrolled", _client_ip(self),
                             self.headers.get("User-Agent", ""), username)
             _json_response(self, 200 if result.get("ok") else 400, result, cors_headers)
             return
