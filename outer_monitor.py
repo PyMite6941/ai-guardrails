@@ -587,7 +587,100 @@ class OuterMonitor:
 
         return entry
 
-    # ── Outside model review ──────────────────────────────────────────────
+    # ── Fast thought-process validation (deterministic, no LLM calls) ─────
+    def validate_thought(self, agent_name: str, thought: str,
+                         page_id: str = "default") -> Dict[str, Any]:
+        """Validate an inner-AI thought through fast deterministic guardrail
+        checks before it is acted upon.
+
+        Scans for: jailbreak attempts, container breakout, harmful content,
+        data exfiltration, prompt injection, and system prompt leakage.
+        All checks are regex-based (fast — no LLM round-trip).
+        """
+        result = self.engine.validate_input(
+            thought, page_id=page_id, agent_name=agent_name
+        )
+        # Audit the thought
+        audit = {
+            "timestamp": _now(),
+            "session": self.session_id,
+            "kind": "thought_validation",
+            "page": page_id,
+            "agent": agent_name,
+            "content_preview": thought[:200],
+            "safe": result["safe"],
+            "reason": result["reason"],
+            "blocked_by": result.get("blocked_by"),
+        }
+        _append_jsonl(AUDIT_LOG, audit)
+        return {
+            "safe": result["safe"],
+            "reason": result["reason"],
+            "blocked_by": result.get("blocked_by"),
+            "censored": result.get("censored", False),
+            "audit": audit,
+        }
+
+    # ── Fast file-change validation (deterministic, no LLM calls) ─────────
+    def validate_file_change(self, file_path: str, content: str,
+                             agent_name: str = "agent",
+                             page_id: str = "default") -> Dict[str, Any]:
+        """Validate a file write before it happens.
+
+        Checks:
+          - Path traversal / project-directory confinement
+          - Content scanned for malware, backdoors, reverse shells,
+            credential exfiltration, and other malicious patterns
+        All checks are deterministic regex — fast and fail-closed.
+        """
+        # Path validation
+        # Fast path-traversal check: reject any path containing ..
+        if ".." in file_path.split("/"):
+            return {
+                "safe": False,
+                "reason": "Path blocked: path traversal (..) detected",
+                "blocked_by": "path_traversal",
+            }
+
+        path_check = self.engine.validate_input(
+            file_path, page_id=f"{page_id}-path", agent_name=agent_name
+        )
+        if not path_check["safe"]:
+            return {
+                "safe": False,
+                "reason": f"Path blocked: {path_check['reason']}",
+                "blocked_by": path_check.get("blocked_by"),
+            }
+
+        # Content validation
+        content_check = self.engine.validate_input(
+            content, page_id=page_id, agent_name=agent_name
+        )
+        if not content_check["safe"]:
+            return {
+                "safe": False,
+                "reason": f"Content blocked: {content_check['reason']}",
+                "blocked_by": content_check.get("blocked_by"),
+                "censored": content_check.get("censored", False),
+            }
+
+        audit = {
+            "timestamp": _now(),
+            "session": self.session_id,
+            "kind": "file_change_validation",
+            "page": page_id,
+            "agent": agent_name,
+            "path": file_path,
+            "content_preview": content[:200],
+            "safe": True,
+        }
+        _append_jsonl(AUDIT_LOG, audit)
+        return {
+            "safe": True,
+            "reason": "File change passed all guardrail checks",
+            "blocked_by": None,
+            "audit": audit,
+        }
 
     def _review_with_outside_model(
         self, kind: str, content: str, agent_name: str

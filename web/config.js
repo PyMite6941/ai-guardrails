@@ -180,13 +180,20 @@ async function testModelConnection() {
   if (!p) { alert("Please select a provider"); return; }
 
   modelTestResult.innerHTML = "Testing connection…";
-  const res = await fetchJson("/api/validate/input", {
-    method: "POST", body: JSON.stringify({ page: "model-test", text: "hello", agent: "test" }),
+  const body = {};
+  if (modelBaseUrlInput && modelBaseUrlInput.value) body.base_url = modelBaseUrlInput.value;
+  else body.base_url = p.default_base_url;
+  if (modelApiKeyInput && modelApiKeyInput.value) body.api_key = modelApiKeyInput.value;
+
+  const res = await fetchJson("/api/models/test", {
+    method: "POST", body: JSON.stringify(body),
   });
   if (res.error) {
-    modelTestResult.innerHTML = '<span style="color:var(--danger)">Connection test failed: ' + res.error + '</span>';
+    modelTestResult.innerHTML = '<span style="color:var(--danger)">✖ Connection failed: ' + escapeHtml(res.error) + '</span>';
+  } else if (res.valid) {
+    modelTestResult.innerHTML = '<span style="color:var(--ok)">✔ Connection OK — HTTP ' + res.status_code + ' in ' + res.response_time_ms + 'ms</span>';
   } else {
-    modelTestResult.innerHTML = '<span style="color:var(--ok)">Connection OK — guardrail engine responding</span>';
+    modelTestResult.innerHTML = '<span style="color:var(--danger)">✖ Connection failed: ' + escapeHtml(res.reason) + '</span>';
   }
 }
 
