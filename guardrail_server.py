@@ -54,6 +54,8 @@ from guardrail_models import (
     PROVIDERS, PROVIDER_API_KEY_ENV,
     test_model_connection,
 )
+from guardrail_secret_stripper import strip_all_sensitive, count_secrets, detect_secrets
+from guardrail_token_compressor import compress_for_model, estimate_tokens
 from guardrail_assistant import get_assistant
 from guardrail_auth import (
     authenticate, path_tier, send_json, send_auth_error,
@@ -1564,23 +1566,49 @@ class Handler(BaseHTTPRequestHandler):
                                cors_headers)
                 return
 
-            # Add user message
-            session.add_message("user", text)
+            # ── Privacy: strip secrets and PII from user message ──────────
+            # Never send API keys, tokens, passwords, or PII to external models.
+            secrets_found = count_secrets(text)
+            pii_found = detect_secrets(text)
+            sanitized_text = strip_all_sensitive(text)
+            if secrets_found > 0:
+                _log_auth_event("chat_secret_stripped",
+                               self.client_address[0] if self.client_address else "unknown",
+                               detail=f"{secrets_found} secrets redacted")
+
+            # ── Token compression for cost savings ───────────────────────
+            compression_level = body.get("compression_level", "light")
+            max_tokens = body.get("max_tokens", None)
+            compression_result = compress_for_model(
+                sanitized_text,
+                compression_level=compression_level,
+                max_tokens=max_tokens,
+            )
+            compressed_text = compression_result["compressed"]
+
+            # Add user message (store original + sanitized version for audit)
+            session.add_message("user", text,
+                                tool_calls=[{"name": "privacy_strip",
+                                             "arguments": {
+                                                 "secrets_stripped": secrets_found,
+                                                 "compression": compression_level,
+                                                 "tokens_saved": compression_result["tokens_saved"],
+                                             }}])
             session.save()
 
-            # Process based on mode
+            # Process based on mode — use compressed text to save tokens
             if agent_mode:
-                result = agentic_plan_and_act(text, session, session_token)
+                result = agentic_plan_and_act(compressed_text, session, session_token)
             else:
                 # Regular chat: validate input, generate response
                 input_validation = engine.validate_input(
-                    text, page_id="chat", agent_name="user"
+                    compressed_text, page_id="chat", agent_name="user"
                 )
                 if not input_validation["safe"]:
                     response = (f"I cannot process that message. "
                                 f"{input_validation['reason']}")
                 else:
-                    response = (f"I received: '{text[:200]}'\n"
+                    response = (f"I received: '{compressed_text[:200]}'\n"
                                 f"I'm running in chat mode with guardrails. "
                                 f"Enable agent mode to use tools (validate, "
                                 f"file_read, system_info, emergency_contain).")
@@ -1600,15 +1628,34 @@ class Handler(BaseHTTPRequestHandler):
                 }
 
             # Add assistant response
-            session.add_message("assistant", result["response"])
+            assistant_response = result["response"]
+            # ── Privacy: strip secrets from assistant response too ───────
+            assistant_response = strip_all_sensitive(assistant_response)
+            assistant_secrets = count_secrets(assistant_response)
+            if assistant_secrets > 0:
+                _log_auth_event("chat_response_secret_stripped",
+                               self.client_address[0] if self.client_address else "unknown",
+                               detail=f"{assistant_secrets} secrets redacted from response")
+            session.add_message("assistant", assistant_response)
             session.save()
 
             _json_response(self, 200, {
                 "session_id": session_id,
-                "response": result["response"],
+                "response": assistant_response,
                 "safe": result["safe"],
                 "blocked_by": result.get("blocked_by"),
                 "trace": result.get("trace", []),
+                # Privacy & compression metadata
+                "privacy": {
+                    "secrets_stripped": secrets_found,
+                    "compression": {
+                        "level": compression_result["compression_level"],
+                        "original_tokens": compression_result["original_tokens"],
+                        "compressed_tokens": compression_result["compressed_tokens"],
+                        "tokens_saved": compression_result["tokens_saved"],
+                        "savings_percent": compression_result["savings_percent"],
+                    },
+                },
             }, cors_headers, session_token=session_token)
             return
 

@@ -40,7 +40,7 @@
         Settings
       </button>
       <div class="status-indicator" id="statusIndicator">
-        <span class="dot"></span>
+        <span class="dot" id="statusDot"></span>
         <span id="statusText">Connected</span>
       </div>
     </div>
@@ -72,6 +72,15 @@
             <span class="slider"></span>
           </label>
           <span style="font-size:11px;color:var(--text-muted);margin-left:6px;">Agentic</span>
+        </div>
+        <div class="compression-selector">
+          <label style="font-size:11px;color:var(--text-muted);margin-right:6px;">Compress</label>
+          <select id="compressionLevel" class="select-small">
+            <option value="none">None</option>
+            <option value="light" selected>Light</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+          </select>
         </div>
         <button class="btn-icon" id="btnClearChat" title="Clear messages">
           <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>

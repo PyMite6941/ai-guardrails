@@ -10,6 +10,7 @@ let currentSessionId = null;
 let providers = [];
 let currentModel = 'ollama';
 let agentMode = false;
+let compressionLevel = 'light';
 let guardrailTrace = [];
 
 // ── DOM elements ──
@@ -32,6 +33,7 @@ const btnCloseGuardrailEl = $("#btnCloseGuardrail");
 const statusIndicatorEl = $("#statusIndicator");
 const statusTextEl = $("#statusText");
 const emptyStateEl = $(".empty-state");
+const compressionLevelEl = $("#compressionLevel");
 
 // ── Fetch wrapper ──
 async function fetchJson(path, opts = {}) {
@@ -169,17 +171,61 @@ async function deleteSession(sessionId) {
   }
 }
 
+// ── Client-side secret stripping ─────────────────────────────────────────
+// Strip API keys, tokens, passwords before they ever leave the browser.
+// This is belt-and-suspenders: the server also strips, but client-side
+// prevents secrets from touching the network at all.
+const SECRET_PATTERNS = [
+  // API keys
+  [/\bsk-[A-Za-z0-9]{20,}/g, "[OPENAI_API_KEY]"],
+  [/\bsk-ant-[A-Za-z0-9\-]{20,}/g, "[ANTHROPIC_API_KEY]"],
+  [/\bsk-[A-Za-z0-9]{16,}/g, "[API_KEY]"],
+  [/\b(ghp_[A-Za-z0-9]{36}|github_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9\-]{20,})\b/g, "[GITHUB_TOKEN]"],
+  [/\bglpat-[A-Za-z0-9\-]{20,}/g, "[GITLAB_TOKEN]"],
+  [/\bAKIA[0-9A-Z]{16}\b/g, "[AWS_ACCESS_KEY_ID]"],
+  [/\bsk_(live|test)_[A-Za-z0-9]{24,}\b/g, "[STRIPE_KEY]"],
+  [/\bSG\.[A-Za-z0-9_-]{22,}\.[A-Za-z0-9_-]{22,}/g, "[SENDGRID_KEY]"],
+  // Passwords / credentials
+  [/\b(?:password|passwd|pwd|secret|api_key|apikey|api_secret|access_token|refresh_token|client_secret)\s*[:=]\s*['"]?\S{3,}['"]?/gi, "[REDACTED]"],
+  [/\b(?:Authorization|authorization)\s*:\s*[A-Za-z0-9\-_ ]{10,}/gi, "Authorization: [REDACTED]"],
+  // Private keys
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----/g, "[PRIVATE_KEY_BLOCK]"],
+  // Emails
+  [/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, "[EMAIL]"],
+  // Private IPs
+  [/\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b/g, "[PRIVATE_IP]"],
+];
+
+function stripSecretsClientSide(text) {
+  let result = text;
+  let strippedCount = 0;
+  for (const [pattern, replacement] of SECRET_PATTERNS) {
+    const matches = result.match(pattern);
+    if (matches) strippedCount += matches.length;
+    result = result.replace(pattern, replacement);
+  }
+  return { sanitized: result, secretsStripped: strippedCount };
+}
+
 // ── Messaging ──
 async function sendMessage() {
   const text = messageInputEl.value.trim();
   if (!text || !currentSessionId) return;
 
+  // ── Client-side secret stripping ──
+  const { sanitized, secretsStripped } = stripSecretsClientSide(text);
+  if (secretsStripped > 0) {
+    showStatusMessage(`${secretsStripped} secret(s) stripped before sending`, "warn");
+  }
+
+  const compression = compressionLevelEl ? compressionLevelEl.value : "light";
+
   messageInputEl.value = "";
   messageInputEl.style.height = "auto";
   btnSendEl.disabled = true;
 
-  // Append user message immediately
-  const userMsg = appendMessage("user", text);
+  // Append user message immediately (show sanitized version)
+  const userMsg = appendMessage("user", sanitized);
   scrollToBottom();
   showTyping(true);
   showGuardrailPanel(false);
@@ -188,9 +234,10 @@ async function sendMessage() {
     method: "POST",
     body: JSON.stringify({
       session_id: currentSessionId,
-      text,
+      text: sanitized,
       model: currentModel,
       agent_mode: agentMode,
+      compression_level: compression,
     })
   });
 
@@ -214,10 +261,45 @@ async function sendMessage() {
     showGuardrailPanel(true);
   }
 
+  // ── Show privacy/compression info ──
+  if (res.privacy) {
+    const p = res.privacy;
+    let infoParts = [];
+    if (p.secrets_stripped > 0) {
+      infoParts.push(`🔒 ${p.secrets_stripped} secret(s) stripped`);
+    }
+    const c = p.compression;
+    if (c && c.tokens_saved > 0) {
+      infoParts.push(`💾 ${c.tokens_saved} tokens saved (${c.savings_percent}%)`);
+    }
+    if (infoParts.length > 0) {
+      appendPrivacyNotice(infoParts.join(" · "));
+    }
+  }
+
   // Append assistant response
   appendMessage("assistant", res.response);
   scrollToBottom();
   btnSendEl.disabled = false;
+}
+
+function appendPrivacyNotice(message) {
+  const el = document.createElement("div");
+  el.className = "privacy-notice";
+  el.style.cssText = `
+    font-size: 11px;
+    color: var(--text-muted);
+    padding: 6px 14px;
+    border-radius: 20px;
+    background: rgba(16, 163, 127, 0.1);
+    border: 1px solid rgba(16, 163, 127, 0.2);
+    margin: 0 12px 12px 52px;
+    display: inline-block;
+    max-width: 700px;
+  `;
+  el.textContent = message;
+  messagesContainerEl.appendChild(el);
+  scrollToBottom();
 }
 
 function appendMessage(role, content, toolCalls, toolResults, timestamp) {
@@ -318,8 +400,19 @@ function updateAgentModeBadge() {
   chatSubtitleEl.textContent = `Agent mode: ${agentMode ? "on" : "off"} · Model: ${currentModel}`;
 }
 
+function showStatusMessage(msg, kind) {
+  const el = document.getElementById("statusText");
+  const dot = document.getElementById("statusDot");
+  if (el) el.textContent = msg;
+  if (dot) dot.style.background = kind === "warn" ? "var(--warn)" : "var(--ok)";
+  setTimeout(() => {
+    if (el) el.textContent = "Authenticated";
+    if (dot) dot.style.background = "var(--accent)";
+  }, 3000);
+}
+
 function escapeHtml(str) {
-  return String(str ?? "").replace(/[&<>"']/g, c => ({
+  return String(str ?? "").replace(/[&<>\"']/g, c => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
   }[c]));
 }
@@ -373,6 +466,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     chatSubtitleEl.textContent = `Agent mode: ${agentMode ? "on" : "off"} · Model: ${currentModel}`;
     updateAgentModeBadge();
   };
+
+  // Compression level change
+  if (compressionLevelEl) {
+    compressionLevelEl.onchange = (e) => {
+      compressionLevel = e.target.value;
+    };
+  }
 
   // Close guardrail panel
   btnCloseGuardrailEl.onclick = () => showGuardrailPanel(false);
