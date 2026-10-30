@@ -34,6 +34,8 @@ const statusIndicatorEl = $("#statusIndicator");
 const statusTextEl = $("#statusText");
 const emptyStateEl = $(".empty-state");
 const compressionLevelEl = $("#compressionLevel");
+const thinkingOverlayEl = $("#thinkingOverlay");
+const neuronNetworkEl = $("#neuronNetwork");
 
 // ── Fetch wrapper ──
 async function fetchJson(path, opts = {}) {
@@ -207,6 +209,59 @@ function stripSecretsClientSide(text) {
   return { sanitized: result, secretsStripped: strippedCount };
 }
 
+// ── Thinking / Neuron Animations ──
+function initNeuronNetwork() {
+  if (!neuronNetworkEl) return;
+  neuronNetworkEl.innerHTML = "";
+  const rect = neuronNetworkEl.getBoundingClientRect();
+  const w = rect.width || 300;
+  const h = rect.height || 200;
+
+  // Create neurons
+  const neuronCount = 12;
+  for (let i = 0; i < neuronCount; i++) {
+    const n = document.createElement("div");
+    n.className = "neuron";
+    n.style.left = Math.random() * 80 + 10 + "%";
+    n.style.top = Math.random() * 80 + 10 + "%";
+    n.style.transitionDelay = Math.random() * 2 + "s";
+    neuronNetworkEl.appendChild(n);
+  }
+
+  // Create synapses between random pairs
+  const neurons = neuronNetworkEl.querySelectorAll(".neuron");
+  for (let i = 0; i < 8; i++) {
+    const s = document.createElement("div");
+    s.className = "synapse";
+    const a = neurons[Math.floor(Math.random() * neurons.length)];
+    const b = neurons[Math.floor(Math.random() * neurons.length)];
+    if (a === b) continue;
+    const ax = parseFloat(a.style.left) * w / 100;
+    const ay = parseFloat(a.style.top) * h / 100;
+    const bx = parseFloat(b.style.left) * w / 100;
+    const by = parseFloat(b.style.top) * h / 100;
+    const length = Math.sqrt((bx - ax) ** 2 + (by - ay) ** 2);
+    const angle = Math.atan2(by - ay, bx - ax) * 180 / Math.PI;
+    s.style.left = ax + "px";
+    s.style.top = ay + "px";
+    s.style.width = length + "px";
+    s.style.transform = `rotate(${angle}deg)`;
+    s.style.transitionDelay = Math.random() * 2 + "s";
+    neuronNetworkEl.appendChild(s);
+  }
+}
+
+function showThinking() {
+  if (thinkingOverlayEl) thinkingOverlayEl.classList.add("visible");
+  if (neuronNetworkEl && neuronNetworkEl.children.length === 0) {
+    initNeuronNetwork();
+  }
+}
+
+function hideThinking() {
+  if (thinkingOverlayEl) thinkingOverlayEl.classList.remove("visible");
+}
+
 // ── Messaging ──
 async function sendMessage() {
   const text = messageInputEl.value.trim();
@@ -229,6 +284,7 @@ async function sendMessage() {
   scrollToBottom();
   showTyping(true);
   showGuardrailPanel(false);
+  showThinking();  // <-- Show thinking overlay with neuron animation
 
   const res = await fetchJson("/api/chat/message", {
     method: "POST",
@@ -242,6 +298,7 @@ async function sendMessage() {
   });
 
   showTyping(false);
+  hideThinking();  // <-- Hide thinking overlay when response arrives
 
   if (res.error) {
     appendMessage("assistant", `Error: ${res.error}`);
@@ -491,4 +548,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     });
   }
+
+  // Initialize neuron network for thinking animation
+  initNeuronNetwork();
 });

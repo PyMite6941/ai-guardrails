@@ -700,3 +700,160 @@ input:checked + .slider:before {
   .model-selector { display: none; }
   .message-bubble { max-width: 85%; }
 }
+
+/* ── Thinking / Neuron Animations ── */
+.thinking-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(10, 10, 12, 0.7);
+  backdrop-filter: blur(4px);
+  z-index: 200;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+}
+
+.thinking-overlay.visible {
+  display: flex;
+}
+
+.thinking-content {
+  text-align: center;
+  color: var(--text);
+}
+
+.thinking-title {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  margin-bottom: 8px;
+  color: var(--accent);
+  animation: thinkingPulse 2s ease-in-out infinite;
+}
+
+.thinking-subtitle {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 32px;
+  animation: thinkingFade 3s ease-in-out infinite;
+}
+
+/* Neuron network */
+.neuron-network {
+  width: 300px;
+  height: 200px;
+  position: relative;
+  margin: 0 auto 24px auto;
+}
+
+.neuron {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  background: var(--accent);
+  border-radius: 50%;
+  box-shadow: 0 0 20px var(--accent-glow);
+  border: 2px solid rgba(16, 163, 127, 0.3);
+}
+
+.neuron::after {
+  content: '';
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px dashed rgba(16, 163, 127, 0.2);
+  animation: neuronPulse 2s ease-in-out infinite;
+}
+
+.neuron.active {
+  background: #3b82f6;
+  box-shadow: 0 0 30px rgba(59, 130, 246, 0.6);
+  border-color: rgba(59, 130, 246, 0.5);
+}
+
+.neuron.active::after {
+  border-color: rgba(59, 130, 246, 0.4);
+  animation: neuronPulseActive 1.5s ease-in-out infinite;
+}
+
+.synapse {
+  position: absolute;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  border-radius: 2px;
+  opacity: 0.4;
+  transform-origin: 0% 50%;
+}
+
+.synapse.active {
+  background: linear-gradient(90deg, transparent, #3b82f6, transparent);
+  opacity: 0.8;
+  animation: synapseFire 1.5s ease-in-out infinite;
+}
+
+@keyframes thinkingPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.7; transform: scale(1.02); }
+}
+
+@keyframes thinkingFade {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+@keyframes neuronPulse {
+  0%, 100% { transform: translate(-50%, -50%) scale(1); opacity: 0.3; }
+  50% { transform: translate(-50%, -50%) scale(1.4); opacity: 0.8; }
+}
+
+@keyframes neuronPulseActive {
+  0%, 100% { transform: translate(-50%, -50%) scale(1); opacity: 0.4; }
+  50% { transform: translate(-50%, -50%) scale(1.6); opacity: 1; }
+}
+
+@keyframes synapseFire {
+  0% { opacity: 0.2; filter: blur(1px); }
+  50% { opacity: 0.9; filter: blur(0px); }
+  100% { opacity: 0.2; filter: blur(1px); }
+}
+
+/* Thinking bubble in chat */
+.message-thinking {
+  display: flex;
+  gap: 12px;
+  animation: fadeIn 0.3s ease-out;
+}
+
+.thinking-neural-net {
+  width: 140px;
+  height: 100px;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.thinking-neuron {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  background: var(--accent);
+  border-radius: 50%;
+  box-shadow: 0 0 10px var(--accent-glow);
+}
+
+.thinking-synapse {
+  position: absolute;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  border-radius: 1px;
+  opacity: 0.3;
+  transform-origin: 0% 50%;
+}
+
+.thinking-synapse.active {
+  opacity: 0.8;
+  animation: synapseFire 1.5s ease-in-out infinite;
+}
