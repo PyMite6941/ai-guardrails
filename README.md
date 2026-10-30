@@ -26,6 +26,13 @@ an NVIDIA open model (Nemotron), over the OpenAI-compatible endpoint
 **Enable it** (key stays in `.env`, which is git-ignored):
 
 ```
+python3 harness/nebius_preflight.py          # checks the key, lists Nemotron ids, times a call
+python3 harness/nebius_preflight.py --write-env   # writes the working config into .env
+```
+
+or by hand:
+
+```
 GUARDRAIL_CLASSIFIER_ENABLED=1
 GUARDRAIL_CLASSIFIER_BASE_URL=https://api.tokenfactory.nebius.com/v1
 GUARDRAIL_CLASSIFIER_MODEL=nvidia/Nemotron-3.5-Super-VL

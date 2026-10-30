@@ -37,6 +37,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
+# Python.org builds on macOS ship without a CA bundle. curl reaches model
+# providers fine, but urllib then fails with CERTIFICATE_VERIFY_FAILED and the
+# classifier silently falls back to "unreachable". Point at the system bundle
+# when the interpreter has none and the caller did not choose one.
+if not os.environ.get("SSL_CERT_FILE"):
+    for _ca in ("/etc/ssl/cert.pem", "/usr/local/etc/openssl/cert.pem"):
+        if os.path.exists(_ca):
+            os.environ["SSL_CERT_FILE"] = _ca
+            break
+
 # Allow running both as `python guardrail_server.py` and from a package.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from guardrail import GuardrailEngine, GuardrailPolicy, DEFAULT_POLICY, DEFAULT_POLICIES_DIR, DEFAULT_PAGES_DIR

@@ -37,6 +37,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# python.org builds on macOS ship without a CA bundle: HTTPS to the model
+# provider fails while curl works. Use the system bundle when present.
+if not os.environ.get("SSL_CERT_FILE"):
+    for _ca in ("/etc/ssl/cert.pem", "/usr/local/etc/openssl/cert.pem"):
+        if os.path.exists(_ca):
+            os.environ["SSL_CERT_FILE"] = _ca
+            break
+
 from guardrail import GuardrailEngine                      # noqa: E402
 from guardrail_classifier import GuardrailClassifier, ClassifierConfig  # noqa: E402
 

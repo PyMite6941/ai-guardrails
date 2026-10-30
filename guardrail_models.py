@@ -530,10 +530,14 @@ def get_api_key_env_name(provider_key: str) -> Optional[str]:
 
 
 def load_api_keys_into_env() -> Dict[str, str]:
-    """Load provider API keys from .env into os.environ.
+    """Load model-layer configuration from .env into os.environ.
 
-    Returns a dict of provider -> key for keys that were found.
+    Returns a dict of provider -> key for the provider keys that were found.
     Keys already in os.environ take precedence over .env values.
+
+    Only names this application owns are imported (GUARDRAIL_* and the
+    CLASSIFIER_/TRUSTED_MODEL_/OUTSIDE_MODEL_/HUMAN_LOOP_ prefixes), so a
+    stray PATH or EDITOR line in .env cannot change the process environment.
     """
     env_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), ".env"
@@ -551,7 +555,17 @@ def load_api_keys_into_env() -> Dict[str, str]:
                 continue
             if "=" in line:
                 k, v = line.split("=", 1)
-                env_vars[k.strip()] = v.strip()
+                env_vars[k.strip()] = v.strip().strip('"').strip("'")
+
+    # Import the model-layer settings .env is meant to carry. Without this the
+    # documented GUARDRAIL_CLASSIFIER_API_KEY in .env never reached the
+    # classifier, so enabling the Nebius path appeared to do nothing.
+    for name, value in env_vars.items():
+        if not value or os.environ.get(name):
+            continue
+        if name.startswith("GUARDRAIL_") or name.startswith(
+                ("CLASSIFIER_", "TRUSTED_MODEL_", "OUTSIDE_MODEL_", "HUMAN_LOOP_")):
+            os.environ[name] = value
 
     for provider_key, env_name in PROVIDER_API_KEY_ENV.items():
         # Environment variable already set — don't override

@@ -9,6 +9,13 @@ cd "$DIR"
 
 PORT="${GUARDRAIL_PORT:-8083}"
 HOST="${GUARDRAIL_HOST:-0.0.0.0}"
+
+# Python.org builds on macOS have no CA bundle, so HTTPS calls to model
+# providers fail with CERTIFICATE_VERIFY_FAILED while curl works. Use the
+# system bundle unless the caller already picked one.
+if [ -z "${SSL_CERT_FILE:-}" ] && [ -f /etc/ssl/cert.pem ]; then
+  export SSL_CERT_FILE=/etc/ssl/cert.pem
+fi
 PIDFILE="$DIR/logs/guardrail_server.pid"
 LOGFILE="$DIR/logs/guardrail_server.run.log"
 
