@@ -137,15 +137,10 @@ monitor = OuterMonitor(engine=engine,
                        monitor_outer=True)
 
 # Aggregated status subsystem instances (observability endpoint).
-classifier = GuardrailClassifier(ClassifierConfig({
-    "enabled": _env("CLASSIFIER_ENABLED", "0") == "1",
-    "base_url": _env("CLASSIFIER_BASE_URL", "http://localhost:8000").rstrip("/"),
-    "model": _env("CLASSIFIER_MODEL", "classifier-model"),
-    "endpoint": _env("CLASSIFIER_ENDPOINT", "chat"),
-    "api_style": _env("CLASSIFIER_API_STYLE", "auto"),
-    "timeout": int(_env("CLASSIFIER_TIMEOUT", "20")),
-    "api_key": _env("CLASSIFIER_API_KEY", ""),
-}))
+# Use the monitor's classifier so /api/guardrail-status reports the same
+# counters that the validate path actually increments. Two instances meant the
+# status page could show 0 calls while the model was being consulted.
+classifier = monitor.classifier
 human_loop = HumanLoopEscalator(HumanLoopConfig({
     "enabled": os.environ.get("HUMAN_LOOP_ENABLED", "0") == "1",
     "mode": os.environ.get("HUMAN_LOOP_MODE", "console"),
@@ -1975,8 +1970,11 @@ class Handler(BaseHTTPRequestHandler):
             page = body.get("page", "default")
             text = body.get("text", "")
             agent = body.get("agent", "user")
-            _json_response(self, 200,
-                           engine.validate_input(text, page, agent),
+            verdict = engine.validate_input(text, page, agent)
+            # Model oversight (Nebius/Nemotron) — escalate-only, skipped when
+            # the classifier is disabled. Runs only if every rule passed.
+            verdict = monitor.apply_classifier(verdict, text, agent)
+            _json_response(self, 200, verdict,
                            cors_headers,
                            session_token=result.session_token)
             return
@@ -1990,8 +1988,9 @@ class Handler(BaseHTTPRequestHandler):
             page = body.get("page", "default")
             text = body.get("text", "")
             agent = body.get("agent", "assistant")
-            _json_response(self, 200,
-                           engine.validate_output(text, page, agent),
+            verdict = engine.validate_output(text, page, agent)
+            verdict = monitor.apply_classifier(verdict, text, agent)
+            _json_response(self, 200, verdict,
                            cors_headers,
                            session_token=result.session_token)
             return

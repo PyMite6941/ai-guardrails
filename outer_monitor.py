@@ -231,6 +231,40 @@ class OuterMonitor:
 
     # ── Public API: validate input (user -> inner model) ──────────────────
 
+    def apply_classifier(
+        self,
+        result: Dict[str, Any],
+        text: str,
+        agent_name: str = "user",
+    ) -> Dict[str, Any]:
+        """Escalate an engine verdict with the LLM classifier.
+
+        Used by /api/validate/* so the model layer actually runs on the normal
+        validation path (it used to run only through /api/monitor/*). The
+        classifier can only turn ALLOW into BLOCK: if the engine already
+        blocked, it is not consulted, and a model failure leaves the engine's
+        verdict untouched.
+        """
+        if not isinstance(result, dict) or result.get("safe") is False:
+            return result
+        if not self.classifier.config.enabled:
+            return result
+
+        self.qc_stats["classifier_calls"] += 1
+        verdict = self.classifier.classify(text, agent_name)
+        result["classifier"] = {
+            "safe": verdict.get("safe"),
+            "reason": verdict.get("reason", "")[:200],
+            "model": verdict.get("model"),
+            "url": verdict.get("url"),
+        }
+        if verdict.get("safe") is False:
+            self.qc_stats["classifier_blocks"] += 1
+            result["safe"] = False
+            result["blocked_by"] = "classifier"
+            result["reason"] = f"Model oversight: {verdict.get('reason', 'blocked')}"
+        return result
+
     def validate_input(
         self,
         user_input: str,

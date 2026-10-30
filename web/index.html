@@ -925,6 +925,9 @@
       '<p class="lede" style="margin-top:10px;">'+esc(blocked?"The guardrail stopped this text before it reached its destination.":"No enabled rule matched. This is not a guarantee of safety.")+"</p>"+
       "<dl><dt>Reason</dt><dd>"+esc(d.reason||"—")+"</dd><dt>Rule</dt><dd>"+esc(ruleText)+"</dd>"+
       "<dt>Page</dt><dd>"+esc(d.page||S.current)+"</dd><dt>Session</dt><dd>"+esc(d.session||"—")+"</dd><dt>Response</dt><dd>"+ms+" ms</dd></dl>"+
+      (d.classifier?'<p class="small muted" style="margin-top:10px;">Model oversight · '+esc(d.classifier.model||"classifier")+" → "+
+        (d.classifier.safe===false?'<b style="color:var(--block)">BLOCK</b>':'<b style="color:var(--ok)">SAFE</b>')+
+        (d.classifier.reason?" · "+esc(d.classifier.reason):"")+"</p>":"")+
       (names.length?'<div class="small muted" style="margin-top:14px;">'+names.map(n=>'<span class="mono" style="margin-right:12px;">'+esc(n)+": "+(checks[n].safe===false?"BLOCK":"pass")+"</span>").join("")+"</div>":"")+"</div>";
   }
 
