@@ -49,6 +49,7 @@ from guardrail_models import (
     load_api_keys_into_env, get_session_provider, set_session_provider,
     clear_session_provider, DEFAULT_PROVIDER_KEY,
     PROVIDERS, PROVIDER_API_KEY_ENV,
+    test_model_connection,
 )
 from guardrail_assistant import get_assistant
 from guardrail_auth import (
@@ -58,7 +59,7 @@ from guardrail_auth import (
     is_2fa_configured, enable_2fa, disable_2fa, verify_2fa_code,
     verify_backup_code, session_2fa_verified, session_2fa_pending,
     has_2fa, _clear_login_attempts, SESSION_TTL_SECONDS,
-    set_csrf_token,
+    set_csrf_token, validate_model_url,
     ADMIN_API_KEY, VIEW_API_KEY, ALLOWED_IPS, ALLOWED_ORIGINS,
     RATE_LIMIT, MAX_BODY_SIZE, BIND_HOST,
     _log_auth_event,
@@ -341,8 +342,10 @@ class Handler(BaseHTTPRequestHandler):
             }, cors_headers)
             return
         if path == "/api/auth/2fa/setup":
-            if not is_auth_configured():
-                _json_response(self, 503, {"error": "auth not configured"},
+            # 2FA requires a password to be set first — you can't have a
+            # second factor without a first factor.
+            if not has_password():
+                _json_response(self, 403, {"error": "password must be set before 2FA. Use /api/auth/setup-password first."},
                                cors_headers)
                 return
             result = enable_2fa()
@@ -809,6 +812,19 @@ class Handler(BaseHTTPRequestHandler):
                                cors_headers)
                 return
 
+            # ── SSRF / domain validation for custom base_url ──────────
+            # Never accept a model URL that resolves to a private/internal
+            # address. This blocks DNS-rebinding and SSRF attacks where an
+            # attacker points the model endpoint at localhost or internal
+            # services.
+            if base_url and base_url.strip():
+                try:
+                    validate_model_url(base_url.strip(), label="model base URL")
+                except ValueError as e:
+                    _json_response(self, 400, {"error": str(e)},
+                                   cors_headers)
+                    return
+
             provider = get_provider(provider_key)
             if provider and provider["api_key_required"] and not api_key:
                 env_name = PROVIDER_API_KEY_ENV.get(provider_key, "")
@@ -847,6 +863,34 @@ class Handler(BaseHTTPRequestHandler):
                 "provider_config": config,
                 "message": f"Model provider set to {provider_name}",
             }, cors_headers, session_token=session_token)
+            return
+
+        # ── Model connection test (POST) ─────────────────────────────
+        # Tests connectivity to a model provider endpoint before accepting
+        # it. Validates domain, SSL certificate, and HTTP reachability.
+        if path == "/api/models/test":
+            try:
+                body = json.loads(self._read_body() or b"{}")
+            except json.JSONDecodeError:
+                _json_response(self, 400, {"error": "invalid json"},
+                               cors_headers)
+                return
+            base_url = body.get("base_url", "")
+            api_key = body.get("api_key", "")
+            if not base_url:
+                _json_response(self, 400, {"error": "base_url is required"},
+                               cors_headers)
+                return
+            # SSRF/domain validation first
+            try:
+                validate_model_url(base_url.strip(), label="model base URL")
+            except ValueError as e:
+                _json_response(self, 400, {"error": str(e)},
+                               cors_headers)
+                return
+            result = test_model_connection(base_url.strip(), api_key=api_key or None)
+            _json_response(self, 200 if result["valid"] else 400, result,
+                           cors_headers)
             return
 
         # ── Assistant endpoints (POST) ─────────────────────────────

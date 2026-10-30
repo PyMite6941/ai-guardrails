@@ -432,6 +432,22 @@ class AssistantManager:
             "message": "system re-enabled" if ok else result.stderr[:200],
         }
 
+    def __getattr__(self, name: str):
+        """Block any method call that is not in the allowed support/maintenance scope.
+
+        This is a final safety net: even if a new method is added to the class
+        by mistake, it will be blocked unless it is explicitly listed in
+        ASSISTANT_ALLOWED_ACTIONS.
+        """
+        if name.startswith("_"):
+            raise AttributeError(f"AssistantManager has no attribute {name!r}")
+        _check_scope(name)
+        # If we get here, the action is allowed but the method doesn't exist.
+        raise AttributeError(
+            f"AssistantManager has no method {name!r}. "
+            + ASSISTANT_SCOPE_NOTICE
+        )
+
 
 # ── Global instance ──────────────────────────────────────────────────
 

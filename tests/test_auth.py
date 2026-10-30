@@ -186,12 +186,16 @@ guardrail_auth.ALLOWED_ORIGINS = []
 # ── SSRF protection tests ──────────────────────────────────────────────────
 
 print("=== SSRF protection ===")
-# Disabled by default
-check("SSRF protection disabled by default", not is_ssrf_protection_enabled())
+# Always enabled — model URLs are operator-configured, not end-user input
+check("SSRF protection always enabled", is_ssrf_protection_enabled())
 
-# URL validation when disabled (should allow everything)
-check("localhost allowed (SSRF disabled)", validate_model_url("http://127.0.0.1:11434") == "http://127.0.0.1:11434")
-check("private IP allowed (SSRF disabled)", validate_model_url("http://10.0.0.1:8000") == "http://10.0.0.1:8000")
+# URL validation — always enforced
+check("localhost allowed", validate_model_url("http://127.0.0.1:11434") == "http://127.0.0.1:11434")
+try:
+    validate_model_url("http://10.0.0.1:8000", "test")
+    check("private IP blocked", False, "should have raised")
+except ValueError:
+    check("private IP blocked", True)
 
 # is_url_private checks the address regardless of env
 check("10.0.0.1 is private", is_url_private("http://10.0.0.1:8000"))
@@ -200,10 +204,7 @@ check("172.16.0.1 is private", is_url_private("http://172.16.0.1:8000"))
 check("127.0.0.1 not private (loopback allowed)", not is_url_private("http://127.0.0.1:11434"))
 check("public IP not private", not is_url_private("http://1.2.3.4:8000"))
 
-# With SSRF protection enabled
-import os as _os
-_os.environ["GUARDRAIL_SSRF_PROTECTION"] = "1"
-check("SSRF protection enabled", is_ssrf_protection_enabled())
+# SSRF blocks private IPs even when env var is not set
 try:
     validate_model_url("http://10.0.0.1:8000", "test")
     check("SSRF blocks private IP", False, "should have raised")
@@ -214,7 +215,6 @@ try:
     check("SSRF allows localhost", True)
 except ValueError:
     check("SSRF allows localhost", False, "should allow localhost")
-_os.environ.pop("GUARDRAIL_SSRF_PROTECTION")
 
 
 # ── AuthResult tests ───────────────────────────────────────────────────────

@@ -191,10 +191,16 @@ def _clear_login_attempts(ident: str) -> None:
 ALLOWED_HOSTS = _env_list("GUARDRAIL_ALLOWED_HOSTS")
 
 def _host_allowed(host: str) -> bool:
-    """Validate the Host header against the allowed list."""
+    """Validate the Host header against the allowed list.
+
+    If GUARDRAIL_ALLOWED_HOSTS is not configured, only localhost/127.0.0.1
+    are allowed (fail closed). This prevents Host header injection and
+    DNS-rebinding attacks.
+    """
     if not ALLOWED_HOSTS:
-        return True  # no restriction configured
-    # Strip port from host for comparison
+        # No allowlist configured — only allow localhost by default.
+        host_name = host.split(":")[0]
+        return host_name in ("localhost", "127.0.0.1", "::1") or host in ("localhost", "127.0.0.1", "::1")
     host_name = host.split(":")[0]
     return host_name in ALLOWED_HOSTS or host in ALLOWED_HOSTS
 
@@ -212,10 +218,11 @@ CSP_POLICY = (
 )
 
 # ── SSRF protection ───────────────────────────────────────────────────────
-# Private/internal IP ranges that external model URLs must not target when
-# SSRF protection is enabled (GUARDRAIL_SSRF_PROTECTION=1).
-# Disabled by default because the model URL is operator-configured, not
-# user input, and localhost is the expected default for local model serving.
+# Private/internal IP ranges that external model URLs must not target.
+# Localhost (127.0.0.0/8, ::1) is NOT included here — local model serving
+# (Ollama, LM Studio, etc.) runs on loopback and must be allowed.
+# The protection blocks external hostnames that resolve to private addresses
+# (DNS rebinding / SSRF), not loopback itself.
 _PRIVATE_NETS: List[ipaddress._BaseNetwork] = [
     ipaddress.ip_network("10.0.0.0/8", strict=False),      # private
     ipaddress.ip_network("172.16.0.0/12", strict=False),   # private
@@ -227,7 +234,13 @@ _PRIVATE_NETS: List[ipaddress._BaseNetwork] = [
 
 
 def is_ssrf_protection_enabled() -> bool:
-    return os.environ.get("GUARDRAIL_SSRF_PROTECTION", "0") == "1"
+    """SSRF protection is always enforced for model provider URLs.
+
+    Model URLs are operator-configured, not end-user input, so there is
+    no legitimate reason to allow private/internal addresses. This function
+    returns True for compatibility with existing tests and callers.
+    """
+    return True
 
 
 def _resolve_host(host: str) -> List[str]:
@@ -254,6 +267,9 @@ def is_url_private(url: str) -> bool:
     Resolves hostnames to IP addresses and checks each resolved address
     against private/internal ranges, closing the DNS-rebinding bypass where
     a hostname could resolve to 10.x/172.x/192.x/link-local.
+
+    Always enforced — model provider URLs are operator-configured, not end-user
+    input, so there is no legitimate reason to allow private addresses.
     """
     try:
         parsed = urlparse(url)
@@ -279,8 +295,9 @@ def is_url_private(url: str) -> bool:
 def validate_model_url(url: str, label: str = "model URL") -> str:
     """Validate a model base URL for SSRF safety.
 
-    Only enforces when GUARDRAIL_SSRF_PROTECTION=1. Returns the URL if safe,
-    or raises ValueError if it targets a private/internal address.
+    Always enforced. Returns the URL if safe, or raises ValueError if it
+    targets a private/internal address or cannot be resolved.
+    Localhost (127.0.0.1, ::1) is always allowed for local model serving.
     """
     if not is_ssrf_protection_enabled():
         return url
