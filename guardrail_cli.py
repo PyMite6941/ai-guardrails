@@ -497,48 +497,150 @@ def cmd_setup(args):
     print(f"  {c_bold('python3 guardrail_cli.py status')}     Check system status")
     print(f"  Open http://127.0.0.1:8083/ in your browser for the web UI")
 
-    # Step 3: Nebius Token Factory (optional LLM provider)
+    # Step 3: Model provider configuration (local + cloud + custom domain)
     print()
-    bold("Step 3 — Nebius Token Factory (optional)")
-    print("Connect Nebius as your LLM provider for the outside monitor or classifier.")
-    print("Get a free API key at https://dev.nebius.com/builders (includes $25 credit).")
+    bold("Step 3 — Model Provider (AI model connection)")
+    print("Connect an AI model for the outside monitor, classifier, and trusted model.")
+    print("You can use a local provider (Ollama, etc.) or a cloud provider (Nebius,")
+    print("Nemus/NVIDIA, OpenRouter, Groq, OpenAI) or your own domain.")
     print()
     try:
-        use_nebius = input("  Configure Nebius now? (yes/no): ").strip().lower()
+        use_model = input("  Configure a model provider now? (yes/no): ").strip().lower()
     except EOFError:
         err("\nSetup cancelled.")
         sys.exit(1)
-    if use_nebius in ("yes", "y"):
+    if use_model not in ("yes", "y"):
+        info("  Skipped. You can add a model provider later via the web UI or CLI.")
+        info("  Run: python3 guardrail_cli.py models list  (to see providers)")
+        return
+
+    # List available providers
+    print()
+    bold("Available providers:")
+    providers = get_providers()
+    for i, p in enumerate(providers, 1):
+        key_status = ""
+        if p["api_key_required"]:
+            key_status = " [key configured]" if p["api_key_configured"] else " [API key needed]"
+        print(f"  {i}. {p['name']} ({p['key']}) — {p['description']}{key_status}")
+    print()
+
+    # Get provider selection
+    while True:
         try:
-            nebius_key = input("  Enter your Nebius API key: ").strip()
+            choice = input("  Select provider number (or enter custom domain): ").strip()
         except EOFError:
             err("\nSetup cancelled.")
             sys.exit(1)
-        if nebius_key:
-            # Write .env file for the operator to source
-            env_path = os.path.join(DIR, ".env")
-            env_lines = []
-            if os.path.exists(env_path):
-                with open(env_path, "r") as f:
-                    env_lines = f.readlines()
-            # Remove existing Nebius lines if present
-            env_lines = [l for l in env_lines
-                         if not l.startswith("GUARDRAIL_NEBIUS_API_KEY=")
-                         and not l.startswith("GUARDRAIL_OUTSIDE_MODEL_API_KEY=")
-                         and not l.startswith("GUARDRAIL_CLASSIFIER_API_KEY=")]
-            env_lines.append(f"GUARDRAIL_NEBIUS_API_KEY={nebius_key}\n")
-            env_lines.append("GUARDRAIL_NEBIUS_BASE_URL=https://api.tokenfactory.nebius.com/v1/\n")
-            env_lines.append("GUARDRAIL_NEBIUS_MODEL=meta-llama/Meta-Llama-3.1-70B-Instruct\n")
-            with open(env_path, "w") as f:
-                f.writelines(env_lines)
-            ok("Nebius API key saved to .env")
-            info("  Source it before starting: source .env && python3 guardrail_cli.py start")
-            info("  Then enable Nebius in the web UI under the model provider settings.")
+        if not choice:
+            warn("  Please enter a provider number or domain.")
+            continue
+        break
+
+    # Check if it's a number (provider index) or a custom domain
+    provider_key = None
+    custom_domain = None
+    try:
+        idx = int(choice) - 1
+        if 0 <= idx < len(providers):
+            provider_key = providers[idx]["key"]
         else:
-            warn("  No API key entered — skipping Nebius configuration.")
-    else:
-        info("  Skipped. You can add Nebius later by setting GUARDRAIL_NEBIUS_API_KEY")
-        info("  in .env and enabling the outside model or classifier.")
+            warn(f"  Invalid provider number. Please enter 1-{len(providers)}.")
+            return
+    except ValueError:
+        # It's a custom domain
+        custom_domain = choice
+        # Validate the domain
+        from guardrail_models import validate_model_base_url
+        domain_validation = validate_model_base_url(custom_domain)
+        if not domain_validation["valid"]:
+            warn(f"  Invalid domain: {domain_validation['reason']}")
+            info("  Example: https://models.yourdomain.com/v1/")
+            return
+        ok(f"  Domain validated: {domain_validation['domain']} ({domain_validation['scheme']})")
+        if domain_validation["resolved_ips"]:
+            info(f"  Resolved IPs: {{', '.join(domain_validation['resolved_ips'])}}")
+
+    # Get API key if needed
+    api_key = None
+    if provider_key and get_provider(provider_key).get("api_key_required"):
+        env_name = PROVIDER_API_KEY_ENV.get(provider_key, "")
+        existing_key = os.environ.get(env_name, "")
+        if existing_key:
+            info(f"  API key already configured via {env_name}.")
+            api_key = existing_key
+        else:
+            try:
+                api_key = input(f"  Enter API key for {get_provider(provider_key)['name']}: ").strip()
+            except EOFError:
+                err("\nSetup cancelled.")
+                sys.exit(1)
+    elif custom_domain:
+        try:
+            api_key = input("  Enter API key for your domain (or leave blank if none): ").strip()
+        except EOFError:
+            err("\nSetup cancelled.")
+            sys.exit(1)
+
+    # Get model name
+    try:
+        model = input("  Enter model name (or press Enter for default): ").strip()
+    except EOFError:
+        err("\nSetup cancelled.")
+        sys.exit(1)
+
+    # Get endpoint
+    try:
+        endpoint = input("  Enter endpoint path (or press Enter for default): ").strip()
+    except EOFError:
+        err("\nSetup cancelled.")
+        sys.exit(1)
+
+    # Build configuration
+    env_path = os.path.join(DIR, ".env")
+    env_lines = []
+    if os.path.exists(env_path):
+        with open(env_path, "r") as f:
+            env_lines = f.readlines()
+
+    # Remove existing model-related lines
+    keys_to_remove = [
+        "GUARDRAIL_OUTSIDE_MODEL_BASE_URL=",
+        "GUARDRAIL_OUTSIDE_MODEL_MODEL=",
+        "GUARDRAIL_OUTSIDE_MODEL_ENDPOINT=",
+        "GUARDRAIL_OUTSIDE_MODEL_API_KEY=",
+        "GUARDRAIL_CUSTOM_DOMAIN_BASE_URL=",
+        "GUARDRAIL_CUSTOM_DOMAIN_MODEL=",
+        "GUARDRAIL_CUSTOM_DOMAIN_ENDPOINT=",
+        "GUARDRAIL_CUSTOM_DOMAIN_API_KEY=",
+    ]
+    env_lines = [l for l in env_lines if not any(l.startswith(k) for k in keys_to_remove)]
+
+    if custom_domain:
+        # Custom domain configuration
+        env_lines.append(f"GUARDRAIL_CUSTOM_DOMAIN_BASE_URL={custom_domain}\\n")
+        env_lines.append(f"GUARDRAIL_CUSTOM_DOMAIN_MODEL={model or 'custom-model'}\\n")
+        env_lines.append(f"GUARDRAIL_CUSTOM_DOMAIN_ENDPOINT={endpoint or 'chat/completions'}\\n")
+        if api_key:
+            env_lines.append(f"GUARDRAIL_CUSTOM_DOMAIN_API_KEY={api_key}\\n")
+        ok(f"  Custom domain configured: {custom_domain}")
+    elif provider_key:
+        provider = get_provider(provider_key)
+        provider_key_env = PROVIDER_API_KEY_ENV.get(provider_key, "")
+        env_lines.append(f"GUARDRAIL_OUTSIDE_MODEL_BASE_URL={provider['default_base_url']}\\n")
+        env_lines.append(f"GUARDRAIL_OUTSIDE_MODEL_MODEL={model or provider['default_model']}\\n")
+        env_lines.append(f"GUARDRAIL_OUTSIDE_MODEL_ENDPOINT={endpoint or provider['default_endpoint']}\\n")
+        if api_key:
+            env_lines.append(f"{provider_key_env}={api_key}\\n")
+        ok(f"  Provider configured: {provider['name']}")
+
+    with open(env_path, "w") as f:
+        f.writelines(env_lines)
+
+    ok("Model provider saved to .env")
+    info("  Source it before starting: source .env && python3 guardrail_cli.py start")
+    info("  Then select the provider in the web UI under Model Provider settings.")
+
 
 
 def main():

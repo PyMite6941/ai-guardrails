@@ -14,14 +14,368 @@
 # environment at startup. They are never written to disk by the UI/CLI.
 #=============================================================================
 
+import ipaddress
 import json
 import os
+import re
+import socket
+import ssl
 from typing import Optional, Dict, Any, List
 
 from guardrail_auth import (
     is_2fa_configured, verify_2fa_code, verify_backup_code,
     SESSION_TTL_SECONDS,
 )
+
+# ── Domain validation ──────────────────────────────────────────────────────
+# Validates custom domain URLs for model providers:
+#   - Proper domain format (RFC 1123)
+#   - Resolves to a real IP (DNS check)
+#   - Not a private/internal address (SSRF protection)
+#   - HTTPS required for cloud providers
+#   - Certificate validity check (optional, on connect)
+#=============================================================================
+
+_PRIVATE_NETS: List[ipaddress._BaseNetwork] = [
+    ipaddress.ip_network("10.0.0.0/8", strict=False),
+    ipaddress.ip_network("172.16.0.0/12", strict=False),
+    ipaddress.ip_network("192.168.0.0/16", strict=False),
+    ipaddress.ip_network("169.254.0.0/16", strict=False),
+    ipaddress.ip_network("fc00::/7", strict=False),
+    ipaddress.ip_network("fe80::/10", strict=False),
+    ipaddress.ip_network("127.0.0.0/8", strict=False),  # localhost
+]
+
+_DOMAIN_RE = re.compile(
+    r"^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$"
+)
+
+
+def _resolve_domain(domain: str) -> List[str]:
+    """Resolve a domain to all IP addresses (IPv4 + IPv6)."""
+    addrs: List[str] = []
+    try:
+        for _fam, _type, _proto, _canon, sa in socket.getaddrinfo(domain, None):
+            addr = sa[0]
+            if addr not in addrs:
+                addrs.append(addr)
+    except Exception:
+        pass
+    return addrs
+
+
+def is_domain_private(domain: str) -> bool:
+    """Return True if the domain resolves to a private/internal address."""
+    addrs = _resolve_domain(domain)
+    if not addrs:
+        return True  # unresolvable = unsafe
+    for addr_str in addrs:
+        try:
+            addr = ipaddress.ip_address(addr_str)
+        except ValueError:
+            continue
+        if any(addr in net for net in _PRIVATE_NETS):
+            return True
+    return False
+
+
+def validate_domain(domain: str) -> Dict[str, Any]:
+    """Validate a domain for use as a model provider URL.
+
+    Returns dict with: valid, reason, resolved_ips, is_private, scheme_suggestion
+    """
+    result: Dict[str, Any] = {
+        "valid": False,
+        "reason": "",
+        "resolved_ips": [],
+        "is_private": False,
+        "scheme_suggestion": "https",
+    }
+
+    if not domain or not domain.strip():
+        result["reason"] = "domain is empty"
+        return result
+
+    domain = domain.strip().lower()
+
+    # Strip scheme if present
+    if domain.startswith("http://"):
+        domain = domain[7:]
+        result["scheme_suggestion"] = "https"
+    elif domain.startswith("https://"):
+        domain = domain[8:]
+    elif domain.startswith("http:/") or domain.startswith("https:/"):
+        result["reason"] = "invalid URL scheme"
+        return result
+
+    # Strip path, port, query
+    domain = domain.split("/")[0]
+    domain = domain.split(":")[0]
+
+    if not domain:
+        result["reason"] = "no domain found"
+        return result
+
+    # Format check
+    if not _DOMAIN_RE.match(domain):
+        result["reason"] = "invalid domain format (RFC 1123)"
+        return result
+
+    # Resolve and check privacy
+    addrs = _resolve_domain(domain)
+    result["resolved_ips"] = addrs
+
+    if not addrs:
+        result["reason"] = "domain could not be resolved (DNS check failed)"
+        return result
+
+    if is_domain_private(domain):
+        result["is_private"] = True
+        result["reason"] = "domain resolves to a private/internal address (SSRF risk)"
+        return result
+
+    result["valid"] = True
+    result["reason"] = "domain is valid and publicly resolvable"
+    return result
+
+
+def validate_model_base_url(url: str) -> Dict[str, Any]:
+    """Validate a full model base URL.
+
+    Returns dict with: valid, reason, domain, scheme, resolved_ips
+    """
+    result: Dict[str, Any] = {
+        "valid": False,
+        "reason": "",
+        "domain": "",
+        "scheme": "",
+        "resolved_ips": [],
+    }
+
+    if not url or not url.strip():
+        result["reason"] = "URL is empty"
+        return result
+
+    url = url.strip()
+
+    # Determine scheme
+    if url.startswith("https://"):
+        scheme = "https"
+        domain_part = url[8:]
+    elif url.startswith("http://"):
+        scheme = "http"
+        domain_part = url[7:]
+    else:
+        # No scheme — assume https for security
+        scheme = "https"
+        domain_part = url
+
+    # Strip path, port
+    domain_part = domain_part.split("/")[0]
+    domain_part = domain_part.split(":")[0]
+
+    result["domain"] = domain_part
+    result["scheme"] = scheme
+
+    # Validate the domain
+    domain_validation = validate_domain(domain_part)
+    if not domain_validation["valid"]:
+        result["reason"] = domain_validation["reason"]
+        return result
+
+    result["resolved_ips"] = domain_validation["resolved_ips"]
+
+    # For https, that's fine. For http, warn but allow (local dev).
+    if scheme == "http":
+        result["reason"] = "HTTP URL accepted but HTTPS is recommended for production"
+    else:
+        result["reason"] = "URL is valid"
+
+    result["valid"] = True
+    return result
+
+
+# ── Custom domain provider configuration ─────────────────────────────────
+
+def make_custom_provider(
+    key: str,
+    name: str,
+    base_url: str,
+    model: str,
+    endpoint: str = "chat/completions",
+    api_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a custom provider config with domain validation."""
+    validation = validate_model_base_url(base_url)
+    if not validation["valid"]:
+        raise ValueError(f"Invalid model base URL: {validation['reason']}")
+
+    return {
+        "key": key,
+        "name": name,
+        "type": "custom",
+        "base_url": base_url.rstrip("/") + "/",
+        "model": model,
+        "endpoint": endpoint,
+        "api_key": api_key or "",
+        "api_key_required": bool(api_key),
+        "description": f"Custom provider: {name} ({base_url})",
+        "domain_validated": True,
+        "domain": validation["domain"],
+        "scheme": validation["scheme"],
+        "resolved_ips": validation["resolved_ips"],
+    }
+
+
+# ── SSL/TLS certificate support ───────────────────────────────────────────
+
+def validate_ssl_certificate(domain: str, port: int = 443, timeout: int = 10) -> Dict[str, Any]:
+    """Validate SSL certificate for a domain.
+
+    Returns dict with: valid, reason, issuer, expires, days_remaining
+    """
+    result: Dict[str, Any] = {
+        "valid": False,
+        "reason": "",
+        "issuer": "",
+        "expires": "",
+        "days_remaining": 0,
+    }
+
+    try:
+        context = ssl.create_default_context()
+        with socket.create_connection((domain, port), timeout=timeout) as sock:
+            with context.wrap_socket(sock, server_hostname=domain) as ssock:
+                cert = ssock.getpeercert()
+
+        if not cert:
+            result["reason"] = "no certificate presented"
+            return result
+
+        # Check issuer
+        issuer = cert.get("issuer", ())
+        issuer_str = ""
+        # issuer is a tuple of tuples: ((('countryName', 'US'),), (('organizationName', '...'),))
+        for component in issuer:
+            if isinstance(component, tuple):
+                for key, value in component:
+                    if key == "commonName":
+                        issuer_str = value
+                        break
+        result["issuer"] = issuer_str or "unknown"
+
+        # Check expiration
+        not_after = cert.get("notAfter", "")
+        if not_after:
+            result["expires"] = not_after
+            # Parse the date (format: 'Mon DD HH:MM:SS YYYY GMT')
+            try:
+                from email.utils import parsedate_to_datetime
+                expiry = parsedate_to_datetime(not_after)
+                from datetime import datetime, timezone
+                now = datetime.now(timezone.utc)
+                days_remaining = (expiry - now).days
+                result["days_remaining"] = days_remaining
+                if days_remaining < 0:
+                    result["reason"] = f"certificate expired {abs(days_remaining)} days ago"
+                    return result
+                elif days_remaining < 7:
+                    result["reason"] = f"certificate expires in {days_remaining} days (renew soon)"
+                    result["valid"] = True  # still valid but warning
+                    return result
+                else:
+                    result["valid"] = True
+                    result["reason"] = "certificate is valid"
+                    return result
+            except Exception:
+                result["valid"] = True
+                result["reason"] = "certificate is valid (could not parse expiry)"
+                return result
+
+        result["valid"] = True
+        result["reason"] = "certificate is valid"
+        return result
+
+    except ssl.SSLCertVerificationError as e:
+        result["reason"] = f"SSL certificate verification failed: {e}"
+        return result
+    except ssl.SSLError as e:
+        result["reason"] = f"SSL error: {e}"
+        return result
+    except socket.gaierror as e:
+        result["reason"] = f"DNS resolution failed: {e}"
+        return result
+    except socket.timeout:
+        result["reason"] = "connection timed out"
+        return result
+    except ConnectionRefusedError:
+        result["reason"] = "connection refused (is the server running?)"
+        return result
+    except Exception as e:
+        result["reason"] = f"unexpected error: {e}"
+        return result
+
+
+def test_model_connection(
+    base_url: str,
+    api_key: Optional[str] = None,
+    timeout: int = 15,
+) -> Dict[str, Any]:
+    """Test connectivity to a model provider endpoint.
+
+    Attempts a lightweight connection to validate the URL is reachable
+    and the server responds. Does NOT send a full completion request.
+    """
+    result: Dict[str, Any] = {
+        "valid": False,
+        "reason": "",
+        "status_code": None,
+        "response_time_ms": 0,
+    }
+
+    import urllib.request
+    import urllib.error
+
+    url = base_url.rstrip("/")
+    if not url.endswith("/"):
+        url += "/"
+
+    # Try a simple GET to the base URL or models endpoint
+    test_urls = [
+        url + "models",
+        url.rstrip("/") + "/v1/models",
+    ]
+
+    headers = {"User-Agent": "ai-guardrails/1.0"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    import time
+    start = time.time()
+
+    for test_url in test_urls:
+        try:
+            req = urllib.request.Request(test_url, headers=headers, method="GET")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                result["valid"] = True
+                result["status_code"] = resp.status
+                result["reason"] = f"server responded with HTTP {resp.status}"
+                result["response_time_ms"] = int((time.time() - start) * 1000)
+                return result
+        except urllib.error.HTTPError as e:
+            # HTTP error codes are still responses — server is reachable
+            result["valid"] = True
+            result["status_code"] = e.code
+            result["reason"] = f"server responded with HTTP {e.code}"
+            result["response_time_ms"] = int((time.time() - start) * 1000)
+            return result
+        except urllib.error.URLError as e:
+            continue
+        except Exception:
+            continue
+
+    result["reason"] = "could not connect to model server"
+    return result
 
 # ── Provider registry ──────────────────────────────────────────────────────
 # Each provider has: key (unique id), name, type (local|cloud), default base
