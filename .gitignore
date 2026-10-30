@@ -46,3 +46,6 @@ logs/guardrail_server.run.log
 build/
 dist/
 *.spec
+
+# Install scripts (local-only, not committed)
+install_1password_cli.sh
