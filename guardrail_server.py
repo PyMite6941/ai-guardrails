@@ -822,6 +822,14 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_file(os.path.join(WEB_DIR, "chat.html"),
                              "text/html", extra_headers=cors_headers)
             return
+        # chat.html loads these two relatively (chat.js / chat.css). Without
+        # these handlers the agentic chat page renders unstyled and inert.
+        if path in ("/chat.js", "/chat.css"):
+            name = path.lstrip("/")
+            ctype = ("text/javascript" if name.endswith(".js") else "text/css")
+            self._serve_file(os.path.join(WEB_DIR, name),
+                             ctype, extra_headers=cors_headers)
+            return
         if path.startswith("/api/policies"):
             segments = [s for s in path.split("/") if s]
             if len(segments) == 2:

@@ -826,6 +826,8 @@ ROUTE_POLICY = [
     # Public surface (deliberately minimal)
     (r"^/$",                     {"GET"},                  "public"),
     (r"^/login$",                {"GET"},                  "public"),
+    (r"^/chat$",                 {"GET"},                  "public"),
+    (r"^/chat\.(html|js|css)$",  {"GET"},                  "public"),
     (r"^/api/health$",           {"GET"},                  "public"),
     (r"^/api/auth/login$",       {"POST"},                 "public"),
     (r"^/api/auth/logout$",      {"POST"},                 "public"),
