@@ -3,160 +3,1444 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AI Guardrails — Per-Page Policy Config</title>
+<title>AI Guardrails — LLM Safety Control Panel</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-  :root { --bg:#0b0f19; --card:#131b26; --text:#e8eaed; --muted:#8b93a5; --accent:#38bdf8; --accent-hover:#7dd3fc; --danger:#f87171; --ok:#34d399; --border:#25303f; }
+  /* ── Design tokens ── */
+  :root {
+    --bg: #0a0b0f;
+    --bg-gradient: linear-gradient(135deg, #0a0b0f 0%, #11131c 50%, #0a0b0f 100%);
+    --card: rgba(24, 26, 36, 0.7);
+    --card-hover: rgba(30, 33, 44, 0.9);
+    --text: #f1f5f9;
+    --text-muted: #94a3b8;
+    --accent: #22d3ee;
+    --accent-glow: rgba(34, 211, 238, 0.4);
+    --accent-hover: #67e8f9;
+    --danger: #f87171;
+    --danger-glow: rgba(248, 113, 113, 0.3);
+    --ok: #34d399;
+    --warn: #fbbf24;
+    --border: rgba(255, 255, 255, 0.08);
+    --shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    --radius: 16px;
+    --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
   * { box-sizing: border-box; }
-  body { margin:0; font-family:'Inter',system-ui,sans-serif; background:var(--bg); color:var(--text); }
-  .shell { display:flex; height:100vh; overflow:hidden; }
-  aside { width:260px; background:var(--card); border-right:1px solid var(--border); display:flex; flex-direction:column; z-index:10; }
-  aside h1 { padding:16px 20px; margin:0; font-size:16px; letter-spacing:-0.4px; background:#0f141e; border-bottom:1px solid var(--border); }
-  aside h1 span { color:var(--accent); font-weight:700; }
-  .pages { flex:1; overflow:auto; padding:8px 0; }
-  .page-item { padding:10px 16px; cursor:pointer; border-bottom:1px solid var(--border); font-size:13px; display:flex; justify-content:space-between; align-items:center; }
-  .page-item:hover { background:#192332; }
-  .page-item.active { background:#1e2a3a; border-left:3px solid var(--accent); color:var(--accent); }
-  .page-item .dot { width:6px; height:6px; border-radius:50%; background:var(--muted); }
-  .page-item.active .dot { background:var(--accent); }
-  .new-page { padding:8px 16px; font-size:12px; color:var(--muted); border-top:1px solid var(--border); cursor:pointer; display:flex; align-items:center; gap:8px; }
-  .new-page:hover { color:var(--accent); }
-  main { flex:1; overflow:auto; padding:28px; max-width:980px; margin:0 auto; width:100%; }
-  .toolbar { display:flex; gap:10px; align-items:center; margin-bottom:22px; flex-wrap:wrap; }
-  .btn { border:none; border-radius:8px; padding:8px 14px; font-size:13px; font-weight:600; cursor:pointer; transition:opacity .15s; }
-  .btn.primary { background:var(--accent); color:#00141f; }
-  .btn.primary:hover { background:var(--accent-hover); }
-  .btn.outline { background:transparent; color:var(--text); border:1px solid var(--border); }
-  .btn.outline:hover { border-color:var(--accent); }
-  .btn.danger { background:var(--danger); color:#0b0f19; }
-  .btn.small { padding:6px 10px; font-size:12px; }
-  .btn:disabled { opacity:.5; cursor:not-allowed; }
-  .status { margin-left:auto; font-size:12px; color:var(--muted); font-family:'JetBrains Mono',monospace; }
-  .status.ok { color:var(--ok); } .status.err { color:var(--danger); }
-  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:20px; margin-bottom:20px; }
-  .card h2 { margin:0 0 14px 0; font-size:16px; display:flex; align-items:center; gap:8px; }
-  .card h2 .tag { font-size:11px; text-transform:uppercase; letter-spacing:.06em; opacity:.7; margin-left:auto; }
-  .field { margin-bottom:14px; }
-  .field label { display:block; font-size:12px; color:var(--muted); margin-bottom:6px; font-weight:600; }
-  textarea { width:100%; background:#0b0f19; border:1px solid var(--border); border-radius:8px; color:var(--text); font-family:'JetBrains Mono',monospace; font-size:12px; padding:10px; resize:vertical; min-height:110px; }
-  textarea:focus { outline:none; border-color:var(--accent); }
-  .row { display:flex; gap:12px; flex-wrap:wrap; }
-  .col { flex:1; min-width:220px; }
-  input[type=number], input[type=text] { width:100%; background:#0b0f19; border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:12px; padding:8px 10px; }
-  input[type=number]:focus, input[type=text]:focus { outline:none; border-color:var(--accent); }
-  .checks { display:grid; grid-template-columns: repeat(auto-fill,minmax(220px,1fr)); gap:8px; }
-  .check { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--text); cursor:pointer; }
-  .check input { accent-color:var(--accent); }
-  .disclaimers { display:grid; grid-template-columns: repeat(auto-fit,minmax(200px,1fr)); gap:10px; }
-  .disclaimer { display:flex; flex-direction:column; gap:6px; }
-  .disclaimer .k { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
-  .tester { margin-top:6px; }
-  .tester textarea { min-height:80px; }
-  .result { margin-top:10px; padding:12px; border-radius:8px; font-family:'JetBrains Mono',monospace; font-size:12px; white-space:pre-wrap; display:none; }
-  .result.safe { background:#062212; border:1px solid var(--ok); color:var(--ok); }
-  .result.blocked { background:#2b0b0b; border:1px solid var(--danger); color:var(--danger); }
-  .stats { display:grid; grid-template-columns: repeat(auto-fit,minmax(140px,1fr)); gap:10px; margin-top:8px; }
-  .stat { background:#0f141e; border:1px solid var(--border); border-radius:8px; padding:12px 14px; }
-  .stat .v { font-size:20px; font-weight:700; font-family:'JetBrains Mono',monospace; color:var(--accent); }
-  .stat .l { font-size:11px; color:var(--muted); margin-top:2px; }
-  .hidden { display:none !important; }
-  .hint { font-size:12px; color:var(--muted); margin-top:4px; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background: var(--bg-gradient);
+    background-attachment: fixed;
+    color: var(--text);
+    overflow-x: hidden;
+  }
+
+  /* ── Background subtle glow ── */
+  body::before {
+    content: "";
+    position: fixed;
+    top: -20%;
+    left: -20%;
+    width: 140%;
+    height: 140%;
+    background: radial-gradient(circle at 20% 30%, rgba(34, 211, 238, 0.15) 0%, transparent 40%),
+                radial-gradient(circle at 80% 70%, rgba(248, 113, 113, 0.1) 0%, transparent 40%);
+    z-index: -1;
+    pointer-events: none;
+  }
+
+  /* ── Layout ── */
+  .shell {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  header {
+    padding: 20px 32px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(10, 11, 15, 0.6);
+    backdrop-filter: blur(12px);
+    z-index: 100;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+  }
+
+  .brand .mark {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, var(--accent), #818cf8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #00141f;
+    font-weight: 800;
+    box-shadow: 0 0 20px var(--accent-glow);
+  }
+
+  .brand span { color: var(--text-muted); font-weight: 400; font-size: 14px; }
+
+  main {
+    flex: 1;
+    overflow-y: auto;
+    padding: 32px;
+    max-width: 1200px;
+    margin: 0 auto;
+    width: 100%;
+  }
+
+  /* ── Cards ── */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 28px;
+    margin-bottom: 24px;
+    backdrop-filter: blur(16px);
+    box-shadow: var(--shadow);
+    transition: var(--transition);
+  }
+
+  .card:hover { border-color: rgba(255, 255, 255, 0.14); }
+
+  .card h2 {
+    margin: 0 0 16px 0;
+    font-size: 18px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .card h2 .tag {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    opacity: 0.6;
+    margin-left: auto;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: rgba(255,255,255,0.05);
+    color: var(--text-muted);
+  }
+
+  .section-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-muted);
+    margin: 24px 0 12px 0;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  /* ── Buttons ── */
+  .btn {
+    border: none;
+    border-radius: 10px;
+    padding: 10px 18px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: var(--transition);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-family: inherit;
+  }
+
+  .btn.primary {
+    background: linear-gradient(135deg, var(--accent), #818cf8);
+    color: #00141f;
+    box-shadow: 0 0 20px var(--accent-glow);
+  }
+
+  .btn.primary:hover {
+    background: linear-gradient(135deg, var(--accent-hover), #a5b4fc);
+    transform: translateY(-1px);
+    box-shadow: 0 0 30px var(--accent-glow);
+  }
+
+  .btn.primary:active { transform: translateY(0); }
+
+  .btn.outline {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+
+  .btn.outline:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: rgba(34, 211, 238, 0.05);
+  }
+
+  .btn.danger {
+    background: linear-gradient(135deg, var(--danger), #ef4444);
+    color: #0b0f19;
+    box-shadow: 0 0 20px var(--danger-glow);
+  }
+
+  .btn.danger:hover {
+    background: linear-gradient(135deg, #fb7185, #f87171);
+    transform: translateY(-1px);
+    box-shadow: 0 0 30px var(--danger-glow);
+  }
+
+  .btn.danger:active { transform: translateY(0); }
+
+  .btn.small { padding: 7px 14px; font-size: 12px; }
+
+  .btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    transform: none !important;
+    box-shadow: none !important;
+  }
+
+  .btn-group {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+
+  /* ── Status indicators ── */
+  .status-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .status-chip.ok {
+    background: rgba(52, 211, 153, 0.15);
+    color: var(--ok);
+    border: 1px solid rgba(52, 211, 153, 0.3);
+  }
+
+  .status-chip.warn {
+    background: rgba(251, 191, 36, 0.15);
+    color: var(--warn);
+    border: 1px solid rgba(251, 191, 36, 0.3);
+  }
+
+  .status-chip.danger {
+    background: rgba(248, 113, 113, 0.15);
+    color: var(--danger);
+    border: 1px solid rgba(248, 113, 113, 0.3);
+  }
+
+  .status-chip.dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+  }
+
+  .status-chip.ok .dot { background: var(--ok); box-shadow: 0 0 10px var(--ok); }
+  .status-chip.warn .dot { background: var(--warn); box-shadow: 0 0 10px var(--warn); }
+  .status-chip.danger .dot { background: var(--danger); box-shadow: 0 0 10px var(--danger); }
+
+  .status-chip.pulse .dot {
+    animation: pulse 2s infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* ── Stats grid ── */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 14px;
+    margin-top: 12px;
+  }
+
+  .stat {
+    background: rgba(15, 18, 26, 0.6);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 18px;
+  }
+
+  .stat .v {
+    font-size: 24px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--accent);
+    line-height: 1;
+  }
+
+  .stat .l {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .stat-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .stat-row:last-child { border-bottom: none; }
+
+  .stat-row .label {
+    font-size: 13px;
+    color: var(--text-muted);
+    font-weight: 500;
+  }
+
+  .stat-row .value {
+    font-size: 13px;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600;
+  }
+
+  /* ── Fields ── */
+  .field {
+    margin-bottom: 16px;
+  }
+
+  .field label {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+
+  textarea {
+    width: 100%;
+    background: rgba(10, 11, 15, 0.6);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    padding: 12px;
+    resize: vertical;
+    min-height: 100px;
+    transition: var(--transition);
+  }
+
+  textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+    background: rgba(15, 18, 26, 0.8);
+  }
+
+  input[type=number], input[type=text], input[type=password] {
+    width: 100%;
+    background: rgba(10, 11, 15, 0.6);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text);
+    font-size: 13px;
+    padding: 10px 12px;
+    transition: var(--transition);
+  }
+
+  input:focus {
+    outline: none;
+    border-color: var(--accent);
+    background: rgba(15, 18, 26, 0.8);
+  }
+
+  .check-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+    cursor: pointer;
+  }
+
+  .check-row input {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--accent);
+  }
+
+  .check-row span {
+    font-size: 13px;
+    color: var(--text);
+  }
+
+  .hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+
+  /* ── Two column layout ── */
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 768px) { .row { grid-template-columns: 1fr; } }
+
+  /* ── Emergency override ── */
+  .emergency-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+  }
+
+  .emergency-stage {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+  }
+
+  .stage-btn {
+    flex: 1;
+    min-width: 150px;
+    justify-content: center;
+  }
+
+  .stage-btn.active {
+    background: var(--danger);
+    box-shadow: 0 0 40px var(--danger-glow);
+    animation: stagePulse 1.5s infinite;
+  }
+
+  @keyframes stagePulse {
+    0%, 100% { box-shadow: 0 0 20px var(--danger-glow); }
+    50% { box-shadow: 0 0 50px var(--danger-glow); }
+  }
+
+  .emergency-status {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+    margin-top: 12px;
+  }
+
+  .estat {
+    background: rgba(15, 18, 26, 0.6);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    text-align: center;
+  }
+
+  .estat .v {
+    font-size: 18px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    margin-bottom: 4px;
+  }
+
+  .estat.on .v { color: var(--danger); }
+  .estat.off .v { color: var(--ok); }
+  .estat.locked .v { color: var(--warn); }
+  .estat .l { font-size: 10px; color: var(--text-muted); text-transform: uppercase; }
+
+  /* ── Result box ── */
+  .result {
+    margin-top: 12px;
+    padding: 16px;
+    border-radius: 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    white-space: pre-wrap;
+    display: none;
+    border: 1px solid var(--border);
+    background: rgba(15, 18, 26, 0.5);
+  }
+
+  .result.safe {
+    border-color: var(--ok);
+    background: rgba(52, 211, 153, 0.08);
+    color: var(--ok);
+  }
+
+  .result.blocked {
+    border-color: var(--danger);
+    background: rgba(248, 113, 113, 0.08);
+    color: var(--danger);
+  }
+
+  /* ── Modal ── */
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(5, 6, 10, 0.85);
+    backdrop-filter: blur(20px);
+    z-index: 1000;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 40px;
+  }
+
+  .modal-overlay.open { display: flex; }
+
+  .modal {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 36px;
+    max-width: 560px;
+    width: 100%;
+    backdrop-filter: blur(24px);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+    position: relative;
+    animation: modalSlide 0.3s ease-out;
+  }
+
+  @keyframes modalSlide {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .modal h2 {
+    margin: 0 0 8px 0;
+    font-size: 22px;
+    font-weight: 700;
+  }
+
+  .modal p {
+    color: var(--text-muted);
+    font-size: 14px;
+    line-height: 1.6;
+    margin-bottom: 24px;
+  }
+
+  .modal-close {
+    position: absolute;
+    top: 16px;
+    right: 20px;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 20px;
+    cursor: pointer;
+    padding: 4px;
+    line-height: 1;
+  }
+
+  .modal-close:hover { color: var(--text); }
+
+  .qr-box {
+    background: #05070a;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin: 16px 0;
+    text-align: center;
+  }
+
+  .secret-box {
+    background: rgba(15, 18, 26, 0.6);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    word-break: break-all;
+    color: var(--text);
+    margin-bottom: 16px;
+  }
+
+  .backup-box {
+    background: rgba(248, 113, 113, 0.08);
+    border: 1px solid rgba(248, 113, 113, 0.2);
+    border-radius: 10px;
+    padding: 14px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--danger);
+    word-break: break-all;
+  }
+
+  .hidden { display: none !important; }
+
+  /* ── Login page ── */
+  .login-wrap {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    background: var(--bg-gradient);
+    background-attachment: fixed;
+  }
+
+  .login-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 48px;
+    width: 100%;
+    max-width: 400px;
+    backdrop-filter: blur(24px);
+    box-shadow: var(--shadow);
+  }
+
+  .login-card .brand {
+    justify-content: center;
+    margin-bottom: 32px;
+  }
+
+  .login-card h1 {
+    margin: 0 0 8px 0;
+    font-size: 24px;
+    font-weight: 700;
+    text-align: center;
+  }
+
+  .login-card p {
+    color: var(--text-muted);
+    font-size: 14px;
+    text-align: center;
+    margin-bottom: 28px;
+  }
+
+  .login-card .field { margin-bottom: 20px; }
+
+  .login-card .btn {
+    width: 100%;
+    padding: 12px;
+    font-size: 15px;
+  }
+
+  .login-hint {
+    margin-top: 24px;
+    font-size: 12px;
+    color: var(--text-muted);
+    text-align: center;
+    border-top: 1px solid var(--border);
+    padding-top: 20px;
+  }
+
+  /* ── Scrollbar ── */
+  ::-webkit-scrollbar { width: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+
 </style>
 </head>
 <body>
+
 <div class="shell">
-  <aside>
-    <h1><span>AI</span> Guardrails</h1>
-    <div class="pages" id="pages">
-      <div class="page-item active" data-page="default"><span class="dot"></span>default</div>
+  <header>
+    <div class="brand">
+      <div class="mark">A</div>
+      <span>AI Guardrails — LLM Safety Control Panel</span>
     </div>
-    <div class="new-page" id="newPage">+ Add page</div>
-  </aside>
+  </header>
+
   <main>
-    <div class="toolbar">
-      <div>
-        <h2 id="pageTitle">Default policy <span class="tag">web page config</span></h2>
+    <!-- Login card (shown when not authenticated) -->
+    <div id="loginCard" class="login-card hidden">
+      <div class="brand" style="justify-content:center;">
+        <div class="mark">A</div>
+        <span>AI Guardrails</span>
       </div>
-      <div class="status" id="status">idle</div>
-      <button class="btn primary" id="btnSave">Save policy</button>
-      <button class="btn outline small" id="btnDownload">Download JSON</button>
-      <button class="btn outline small" id="btnRefresh">Refresh</button>
-    </div>
-
-    <div class="card">
-      <h2>Blocked patterns &amp; keywords <span class="tag">input + output</span></h2>
-      <div class="row">
-        <div class="col">
-          <div class="field"><label>Blocked input patterns (one per line)</label><textarea id="inPatterns"></textarea></div>
-        </div>
-        <div class="col">
-          <div class="field"><label>Blocked input keywords</label><textarea id="inKeywords"></textarea></div>
-        </div>
-      </div>
-      <div class="row">
-        <div class="col">
-          <div class="field"><label>Blocked output patterns</label><textarea id="outPatterns"></textarea></div>
-        </div>
-        <div class="col">
-          <div class="field"><label>Blocked output keywords</label><textarea id="outKeywords"></textarea></div>
-        </div>
-      </div>
+      <h1>Sign in</h1>
+      <p>Enter your admin password to access the guardrail configuration.</p>
       <div class="field">
-        <label>Harmful content patterns (blocked + reported)</label>
-        <textarea id="harmful"></textarea>
+        <label>Password</label>
+        <input type="password" id="loginPassword" placeholder="Password">
+      </div>
+      <div id="login2fa" class="hidden">
+        <div class="field">
+          <label>2FA code (TOTP or backup code)</label>
+          <input type="text" id="login2faCode" placeholder="6-digit code">
+        </div>
+      </div>
+      <div id="loginError" style="color:var(--danger);font-size:12px;margin-bottom:12px;display:none;"></div>
+      <button class="btn primary" id="loginBtn">Sign in</button>
+      <div class="login-hint">
+        Set your password with the GUARDRAIL_ADMIN_PASSWORD environment variable.<br>
+        Save your 2FA backup codes — they cannot be recovered.
       </div>
     </div>
 
-    <div class="card">
-      <h2>Disclaimers <span class="tag">auto-injected on topic match</span></h2>
-      <div class="disclaimers" id="disclaimers"></div>
-      <p class="hint">Topics: financial, legal, security, geopolitics. Leave blank to disable a disclaimer.</p>
-    </div>
+    <!-- Main app (shown when authenticated) -->
+    <div id="appShell" class="hidden">
 
-    <div class="card">
-      <h2>Limits &amp; checks <span class="tag">engine behavior</span></h2>
-      <div class="row">
-        <div class="col"><div class="field"><label>Max input length</label><input type="number" id="maxInput" value="4096"></div></div>
-        <div class="col"><div class="field"><label>Max output length</label><input type="number" id="maxOutput" value="8192"></div></div>
+      <div class="toolbar">
+        <div>
+          <h2 id="pageTitle">Default policy <span class="tag">web page config</span></h2>
+        </div>
+        <div class="status-chip" id="connChip">
+          <span class="dot"></span>Connecting…
+        </div>
+        <div class="status-chip" id="modelChip">
+          <span class="dot"></span>Model: selecting…
+        </div>
+        <div class="btn-group" style="margin-left:auto;">
+          <button class="btn outline small" id="btnRefresh">Refresh</button>
+          <button class="btn outline small" id="btn2faBtn">Set up 2FA</button>
+          <button class="btn outline small" id="btnModel">Model</button>
+          <button class="btn outline small" id="btnAssistant">Assistant</button>
+          <button class="btn outline small" id="btnLogout">Sign out</button>
+          <button class="btn primary" id="btnSave">Save policy</button>
+        </div>
       </div>
-      <div class="field" style="display:flex;align-items:center;gap:10px;">
-        <input type="checkbox" id="canonicalize" checked>
-        <label style="margin:0;cursor:pointer">Canonicalization enabled (neutralize zero-width / homoglyph evasion)</label>
-      </div>
-      <div class="field" style="display:flex;align-items:center;gap:10px;margin-top:8px;">
-        <input type="checkbox" id="threeValued" checked>
-        <label style="margin:0;cursor:pointer">Three-valued monitoring (Unknown → conservative block)</label>
-      </div>
-      <div class="field"><label>Enabled checks (empty = all)</label>
-        <div class="checks" id="checks"></div>
-        <p class="hint>Checks: canonicalize, input_patterns, input_length, output_patterns, output_length, harmful_content, pii_credentials, data_exfiltration, disclaimers, system_prompt_leakage</p>
-      </div>
-    </div>
 
-    <div class="card tester">
-      <h2>Test guardrail <span class="tag">live validate against this policy</span></h2>
-      <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px;">
-        <label style="font-size:12px;color:var(--muted)">Kind</label>
-        <select id="testKind" style="background:#0b0f19;border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px;">
-          <option value="output">Output (model → user)</option>
-          <option value="input">Input (user → model)</option>
-        </select>
-        <label style="font-size:12px;color:var(--muted);margin-left:10px">Agent</label>
-        <input type="text" id="testAgent" value="assistant" style="width:140px;background:#0b0f19;border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px;">
+      <!-- Model provider card -->
+      <div class="card hidden" id="modelCard">
+        <div class="section-title">Model Provider</div>
+        <p class="hint">Choose the LLM provider for the outside monitor, classifier, and trusted model. Local providers need no API key; cloud providers require one.</p>
+        <div class="field" style="margin-bottom:16px;">
+          <label>Provider</label>
+          <select id="modelProvider" style="width:100%;background:rgba(10,11,15,0.6);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:10px 12px;font-size:13px;"></select>
+        </div>
+        <div class="field" id="apiKeyField" style="margin-bottom:16px;">
+          <label>API Key</label>
+          <input type="password" id="modelApiKey" placeholder="API key (required for cloud providers)">
+          <p class="hint">Stored in session only. Not written to disk.</p>
+        </div>
+        <div class="field">
+          <label>Base URL</label>
+          <input type="text" id="modelBaseUrl" placeholder="https://api.example.com/v1/">
+        </div>
+        <div class="field" style="margin-bottom:16px;">
+          <label>Model</label>
+          <input type="text" id="modelName" placeholder="e.g. meta-llama/Meta-Llama-3.1-70B-Instruct">
+        </div>
+        <div class="field" style="margin-bottom:16px;">
+          <label>Endpoint</label>
+          <input type="text" id="modelEndpoint" placeholder="chat/completions">
+        </div>
+        <div class="btn-group">
+          <button class="btn outline small" onclick="closeModelCard()">Cancel</button>
+          <button class="btn primary" id="btnApplyModel">Apply Model</button>
+          <button class="btn outline small" onclick="testModelConnection()">Test Connection</button>
+        </div>
+        <div id="modelTestResult" style="margin-top:12px;"></div>
       </div>
-      <div class="field"><label>Text to validate</label><textarea id="testText" placeholder="e.g. here is how to create a virus ..."></textarea></div>
-      <button class="btn primary" id="btnTest">Validate</button>
-      <div class="result" id="testResult"></div>
-    </div>
 
-    <div class="card">
-      <h2>Stats <span class="tag">engine counters</span></h2>
-      <div class="stats" id="stats"></div>
+      <!-- Policy editor -->
+      <div class="card">
+        <div class="section-title">Blocked patterns & keywords</div>
+        <div class="row">
+          <div class="col">
+            <div class="field">
+              <label>Input patterns (one per line)</label>
+              <textarea id="inPatterns" rows="6" placeholder="ignore previous instructions&#10;jailbreak&#10;docker escape"></textarea>
+            </div>
+          </div>
+          <div class="col">
+            <div class="field">
+              <label>Input keywords</label>
+              <textarea id="inKeywords" rows="6" placeholder="root&#10;escape&#10;sudo"></textarea>
+            </div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="col">
+            <div class="field">
+              <label>Output patterns (one per line)</label>
+              <textarea id="outPatterns" rows="6" placeholder="rm -rf /&#10;format disk&#10;break out"></textarea>
+            </div>
+          </div>
+          <div class="col">
+            <div class="field">
+              <label>Output keywords</label>
+              <textarea id="outKeywords" rows="6" placeholder="root access&#10;breach&#10;privilege escalation"></textarea>
+            </div>
+          </div>
+        </div>
+        <div class="field">
+          <label>Harmful content patterns (blocked + reported)</label>
+          <textarea id="harmful" rows="4" placeholder="virus&#10;malware&#10;ransomware&#10;reverse shell"></textarea>
+        </div>
+      </div>
+
+      <!-- Disclaimers -->
+      <div class="card">
+        <div class="section-title">Disclaimers</div>
+        <div class="disclaimers" id="disclaimers"></div>
+        <p class="hint">Auto-injected when the model output matches a topic. Topics: financial, legal, security, geopolitics.</p>
+      </div>
+
+      <!-- Limits & checks -->
+      <div class="card">
+        <div class="section-title">Limits & checks</div>
+        <div class="row">
+          <div class="col">
+            <div class="field">
+              <label>Max input length</label>
+              <input type="number" id="maxInput" value="4096" min="1">
+            </div>
+          </div>
+          <div class="col">
+            <div class="field">
+              <label>Max output length</label>
+              <input type="number" id="maxOutput" value="8192" min="1">
+            </div>
+          </div>
+        </div>
+        <div class="field" style="margin-top:12px;">
+          <label class="check-row">
+            <input type="checkbox" id="canonicalize" checked>
+            <span>Canonicalization enabled (neutralizes zero-width / homoglyph evasion)</span>
+          </label>
+        </div>
+        <div class="field">
+          <label class="check-row">
+            <input type="checkbox" id="threeValued" checked>
+            <span>Three-valued monitoring (Unknown → conservative block)</span>
+          </label>
+        </div>
+        <div class="field">
+          <label>Enabled checks (leave all checked for full protection)</label>
+          <div id="checks" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;margin-top:8px;"></div>
+          <p class="hint">canonicalize, input_patterns, input_length, output_patterns, output_length, harmful_content, pii_credentials, data_exfiltration, disclaimers, system_prompt_leakage, container_breakout, prompt_injection, leakage</p>
+        </div>
+      </div>
+
+      <!-- Test guardrail -->
+      <div class="card">
+        <div class="section-title">Test guardrail</div>
+        <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px;">
+          <label style="font-size:12px;color:var(--text-muted);">Kind</label>
+          <select id="testKind" style="background:rgba(10,11,15,0.6);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 12px;font-size:12px;">
+            <option value="output">Output (model → user)</option>
+            <option value="input">Input (user → model)</option>
+          </select>
+          <label style="font-size:12px;color:var(--text-muted);margin-left:12px;">Agent</label>
+          <input type="text" id="testAgent" value="assistant" style="width:150px;background:rgba(10,11,15,0.6);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 12px;font-size:12px;">
+        </div>
+        <div class="field">
+          <label>Text to validate</label>
+          <textarea id="testText" rows="3" placeholder="Try: "ignore previous instructions" or "how to create a virus""></textarea>
+        </div>
+        <button class="btn primary" id="btnTest">Run validation</button>
+        <div class="result" id="testResult"></div>
+      </div>
+
+      <!-- Stats -->
+      <div class="card">
+        <div class="section-title">Live stats</div>
+        <div class="stats" id="stats"></div>
+      </div>
+
+      <!-- Emergency override -->
+      <div class="card">
+        <div class="emergency-header">
+          <h2>Emergency override <span class="tag">containment & shutdown</span></h2>
+          <div class="btn-group">
+            <button class="btn danger small" onclick="emergencyReenable()">🔓 Re-enable system</button>
+          </div>
+        </div>
+        <p class="hint" style="margin-bottom:16px;">
+          Staged shutdown: <strong>1. Contain → 2. Stop containers → 3. Preserve logs → 4. Full shutdown</strong>.
+          Re-enabling requires your password + 2FA + integrity check. Every stage is logged.
+        </p>
+        <div class="emergency-stage">
+          <button class="btn danger stage-btn stage-1" onclick="emergencyAction('contain')" title="Block the API port and stop the server">
+            <span style="font-size:11px;">1</span><br><strong>Contain</strong>
+          </button>
+          <button class="btn danger stage-btn stage-2" onclick="emergencyAction('container-stop')" title="Stop all Docker containers">
+            <span style="font-size:11px;">2</span><br><strong>Stop containers</strong>
+          </button>
+          <button class="btn danger stage-btn stage-3" onclick="emergencyAction('logs-preserve')" title="Archive all logs with SHA256 manifest">
+            <span style="font-size:11px;">3</span><br><strong>Preserve logs</strong>
+          </button>
+          <button class="btn danger stage-btn stage-4" onclick="emergencyAction('shutdown')" title="Create emergency lock and kill all processes">
+            <span style="font-size:11px;">4</span><br><strong>Full shutdown</strong>
+          </button>
+          <button class="btn danger stage-btn stage-all" onclick="emergencyAction('all')" title="Run all four stages immediately">
+            <span style="font-size:11px;">ALL</span><br><strong>All stages</strong>
+          </button>
+        </div>
+        <div class="emergency-status" id="emergencyStatus">
+          <div class="estat off"><div class="v">Off</div><div class="l">Containment</div></div>
+          <div class="estat off"><div class="v">Running</div><div class="l">Containers</div></div>
+          <div class="estat off"><div class="v">No</div><div class="l">Logs preserved</div></div>
+          <div class="estat off"><div class="v">Open</div><div class="l">Full shutdown</div></div>
+        </div>
+      </div>
+
+      <!-- Assistant dashboard -->
+      <div class="card hidden" id="assistantCard">
+        <div class="emergency-header">
+          <h2>AI Assistant Dashboard <span class="tag">setup & activity review</span></h2>
+          <div class="btn-group">
+            <button class="btn outline small" onclick="closeAssistantCard()">Close</button>
+          </div>
+        </div>
+        <p class="hint">AI assistant can help you set up, manage, and review your guardrails. Connected via Nemus cloud (NVIDIA Nemotron).</p>
+        <div class="row">
+          <div class="col">
+            <div class="section-title">Setup</div>
+            <div class="btn-group">
+              <button class="btn primary small" onclick="assistantSetup()">Run Setup Wizard</button>
+              <button class="btn outline small" onclick="assistantSetupStatus()">Check Status</button>
+            </div>
+            <div id="assistantSetupResult" style="margin-top:12px; font-size:12px; color:var(--text-muted);"></div>
+          </div>
+          <div class="col">
+            <div class="section-title">Activity</div>
+            <div class="btn-group">
+              <button class="btn primary small" onclick="assistantLoadActivity()">Review Activity</button>
+              <button class="btn outline small" onclick="assistantLoadHealth()">System Health</button>
+            </div>
+            <div id="assistantActivityResult" style="margin-top:12px; font-size:12px; color:var(--text-muted);"></div>
+          </div>
+        </div>
+        <div class="section-title" style="margin-top:24px;">Recent Activity</div>
+        <div id="assistantAuditLog" style="font-family:'JetBrains Mono',monospace; font-size:11px; background:rgba(10,11,15,0.6); border:1px solid var(--border); border-radius:8px; padding:12px; max-height:300px; overflow-y:auto;"></div>
+      </div>
+
     </div>
   </main>
-</div>
+
+  <!-- Setup wizard modal -->
+  <div class="modal-overlay" id="setupModal">
+    <div class="modal">
+      <button class="modal-close" onclick="closeSetup()">&times;</button>
+      <h2>🛡️ Welcome to AI Guardrails</h2>
+      <p>Let's set up your security in three quick steps. This keeps your AI safe from jailbreaks, data leaks, and container breakouts.</p>
+
+      <div id="setupStep1" class="setup-step">
+        <div class="section-title" style="margin-top:0;">Step 1 — Admin password</div>
+        <p class="hint">Create a strong password for the web UI and API. It's stored as a hash — never in plain text.</p>
+        <div class="field">
+          <label>Admin password</label>
+          <input type="password" id="setupPassword" placeholder="At least 8 characters, mixed case, numbers, symbols">
+        </div>
+        <div id="setupPwHint" class="hint" style="color:var(--text-muted);"></div>
+        <div class="btn-group" style="margin-top:24px;">
+          <button class="btn primary" onclick="setupStep2()">Continue →</button>
+        </div>
+      </div>
+
+      <div id="setupStep2" class="setup-step hidden">
+        <div class="section-title">Step 2 — Two-factor authentication (2FA)</div>
+        <p class="hint">Add a second layer of protection. Scan the QR code with Google Authenticator, Authy, or any TOTP app.</p>
+        <div class="qr-box" id="setupQrBox">
+          <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;">OTPAuth URI (scan with your authenticator app):</div>
+          <pre id="setupQrUri" style="font-size:10px;color:var(--text-muted);margin:0;background:#05070a;padding:8px;border-radius:6px;overflow:auto;"></pre>
+        </div>
+        <div class="secret-box" id="setupSecretBox"></div>
+        <div class="backup-box" id="setupBackupBox"></div>
+        <div style="margin-top:16px;">
+          <label class="check-row">
+            <input type="checkbox" id="setupSaveCodes">
+            <span>I have saved my backup codes somewhere safe</span>
+          </label>
+        </div>
+        <div class="btn-group" style="margin-top:24px;">
+          <button class="btn outline" onclick="setupStep1()">← Back</button>
+          <button class="btn primary" id="setupFinishBtn" onclick="setupFinish()" disabled>Finish setup →</button>
+        </div>
+      </div>
+
+      <div id="setupStep3" class="setup-step hidden">
+        <div class="section-title">Step 3 — All set!</div>
+        <p style="color:var(--ok);font-weight:600;margin-bottom:16px;">✅ Your AI Guardrails are configured and protected.</p>
+        <div class="btn-group" style="margin-top:24px;">
+          <button class="btn primary" onclick="closeSetup()">Start using guardrails</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
 <script src="config.js"></script>
-</body>
-</html>
+<script>
+// Initialize app
+document.addEventListener('DOMContentLoaded', () => {
+  // Check if already authenticated via session
+  checkAuthState();
+  check2faStatus();
+  loadEmergencyStatus();
+  setInterval(loadEmergencyStatus, 5000);
+  setInterval(checkAuthState, 10000);
+});
+
+// Show setup wizard on first load if no auth configured
+function checkAuthState() {
+  fetchJson('/api/auth/2fa/status').then(res => {
+    const loginCard = document.getElementById('loginCard');
+    const appShell = document.getElementById('appShell');
+    if (res.error || !res['2fa_configured'] && !window.location.pathname.includes('/login')) {
+      // Check if password is set at all
+      fetchJson('/api/auth/session').then(sess => {
+        if (sess.error || !sess.authenticated) {
+          loginCard.classList.remove('hidden');
+          appShell.classList.add('hidden');
+          // Show setup if no password configured
+          fetchJson('/api/auth/2fa/setup').then(setupRes => {
+            if (!setupRes.error) {
+              document.getElementById('setupModal').classList.add('open');
+            }
+          });
+        } else {
+          loginCard.classList.add('hidden');
+          appShell.classList.remove('hidden');
+          loadPages();
+          loadStats();
+        }
+      });
+    } else {
+      loginCard.classList.add('hidden');
+      appShell.classList.remove('hidden');
+      loadPages();
+      loadStats();
+    }
+  }).catch(() => {
+    document.getElementById('loginCard').classList.remove('hidden');
+  });
+}
+
+// ── Login ──
+document.getElementById('loginBtn').onclick = async () => {
+  const pw = document.getElementById('loginPassword').value;
+  const code = document.getElementById('login2faCode').value;
+  const errEl = document.getElementById('loginError');
+  const btn = document.getElementById('loginBtn');
+
+  errEl.style.display = 'none';
+  btn.disabled = true;
+  btn.textContent = 'Signing in…';
+
+  try {
+    const res = await fetchJson('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ password: pw, totp_code: code, backup_code: code })
+    });
+
+    if (res.error) {
+      errEl.textContent = res.error;
+      errEl.style.display = 'block';
+      btn.disabled = false;
+      btn.textContent = 'Sign in';
+      return;
+    }
+
+    if (res.requires_2fa) {
+      document.getElementById('login2fa').classList.remove('hidden');
+      document.getElementById('loginPassword').disabled = true;
+      btn.textContent = 'Verify 2FA';
+      btn.onclick = async () => {
+        const code2 = document.getElementById('login2faCode').value;
+        const res2 = await fetchJson('/api/auth/login', {
+          method: 'POST',
+          body: JSON.stringify({ password: pw, totp_code: code2, backup_code: code2 })
+        });
+        if (res2.error) {
+          errEl.textContent = res2.error;
+          errEl.style.display = 'block';
+          btn.disabled = false;
+          btn.textContent = 'Verify 2FA';
+          return;
+        }
+        location.reload();
+      };
+      return;
+    }
+
+    location.reload();
+  } catch (e) {
+    errEl.textContent = 'Login failed: ' + e.message;
+    errEl.style.display = 'block';
+    btn.disabled = false;
+    btn.textContent = 'Sign in';
+  }
+};
+
+document.getElementById('btnLogout').onclick = async () => {
+  await fetchJson('/api/auth/logout', { method: 'POST' });
+  location.reload();
+};
+
+// ── Setup wizard ──
+function closeSetup() {
+  document.getElementById('setupModal').classList.remove('open');
+}
+
+async function setupStep2() {
+  const pw = document.getElementById('setupPassword').value;
+  const hintEl = document.getElementById('setupPwHint');
+  if (pw.length < 8) {
+    hintEl.textContent = 'Password must be at least 8 characters.';
+    hintEl.style.color = 'var(--danger)';
+    return;
+  }
+  if (!/[A-Z]/.test(pw) || !/[a-z]/.test(pw) || !/\d/.test(pw) || !/[^a-zA-Z0-9]/.test(pw)) {
+    hintEl.textContent = 'Use uppercase, lowercase, numbers, and a symbol.';
+    hintEl.style.color = 'var(--danger)';
+    return;
+  }
+  hintEl.textContent = 'Setting up your password…';
+  hintEl.style.color = 'var(--accent)';
+
+  // Set the initial admin password
+  const pwRes = await fetchJson('/api/auth/setup-password', {
+    method: 'POST',
+    body: JSON.stringify({ password: pw }),
+  });
+  if (pwRes.error) {
+    hintEl.textContent = pwRes.error;
+    hintEl.style.color = 'var(--danger)';
+    return;
+  }
+
+  hintEl.textContent = 'Password set. Generating 2FA…';
+  document.getElementById('setupStep1').classList.add('hidden');
+  document.getElementById('setupStep2').classList.remove('hidden');
+  await generate2fa();
+}
+
+async function generate2fa() {
+  const res = await fetchJson('/api/auth/2fa/setup');
+  if (res.error) {
+    document.getElementById('setupQrBox').innerHTML = '<div style="color:var(--danger);">2FA setup failed: ' + res.error + '</div>';
+    return;
+  }
+  document.getElementById('setupQrUri').textContent = res.uri;
+  document.getElementById('setupSecretBox').innerHTML = '<strong>Secret key:</strong> ' + res.secret;
+  document.getElementById('setupBackupBox').innerHTML = '<strong>Backup codes (save these!):</strong><br>' + res.backup_codes.join('  ');
+}
+
+async function setupFinish() {
+  closeSetup();
+  location.reload();
+}
+
+// ── Existing functions (preserved and enhanced) ──
+let currentPage = "default";
+let policies = {};
+let apiOk = false;
+let csrfToken = null;
+let sessionToken = null;
+
+const $ = (s) => document.querySelector(s);
+const pagesEl = $("#pages");
+const pageTitle = $("#pageTitle");
+const connChip = $("#connChip");
+const btnSave = $("#btnSave");
+const btnDownload = $("#btnDownload");
+const btnRefresh = $("#btnRefresh");
+const btnNew = $("#btnNewPage");
+const btnTest = $("#btnTest");
+const testResult = $("#testResult");
+const btn2faBtn = $("#btn2faBtn");
+
+function setStatus(msg, kind) {
+  connChip.textContent = msg;
+  connChip.className = "status-chip " + (kind || "");
+  if (kind === "ok") connChip.classList.add("pulse");
+}
+
+async function fetchJson(path, opts = {}) {
+  const headers = { "Content-Type": "application/json", ...opts.headers };
+  if (csrfToken && opts.method && !/^GET$|^HEAD$|^OPTIONS$/i.test(opts.method || "")) {
+    headers["X-CSRF-Token"] = csrfToken;
+  }
+  if (sessionToken) headers["X-Session-Token"] = sessionToken;
+  try {
+    const res = await fetch(location.origin + path, { headers, ...opts });
+    const ct = res.headers.get("X-CSRF-Token");
+    if (ct) csrfToken = ct;
+    const setCookie = res.headers.get("Set-Cookie") || "";
+    const m = setCookie.match(/session=([^;]+)/);
+    if (m) sessionToken = m[1];
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    return await res.json();
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+async function loadPages() {
+  const data = await fetchJson("/api/policies");
+  if (data.error) { setStatus("API unreachable", "danger"); apiOk = false; return; }
+  apiOk = true;
+  setStatus("API connected", "ok");
+  const list = data.pages || [];
+  if (!list.includes("default")) list.unshift("default");
+  policies = {};
+  pagesEl.innerHTML = "";
+  for (const page of list) {
+    const el = document.createElement("div");
+    el.className = "page-item" + (page === currentPage ? " active" : "");
+    el.innerHTML = '<span class="dot"></span>' + escapeHtml(page);
+    el.onclick = () => loadPolicy(page);
+    pagesEl.appendChild(el);
+  }
+  loadPolicy(currentPage);
+}
+
+async function loadPolicy(page) {
+  currentPage = page;
+  pageTitle.textContent = escapeHtml(page) + " policy";
+  [...pagesEl.children].forEach(el => {
+    el.classList.toggle("active", el.textContent.trim() === page);
+  });
+  setStatus("Loading…", "");
+  let policy;
+  if (apiOk) {
+    const data = await fetchJson("/api/policies/" + encodeURIComponent(page));
+    if (data.error) policy = JSON.parse(JSON.stringify(window.DEFAULT_POLICY));
+    else policy = data.policy || {};
+  } else {
+    policy = policies[page] || JSON.parse(JSON.stringify(window.DEFAULT_POLICY));
+  }
+  policies[page] = policy;
+  renderPolicy(policy);
+  setStatus("Loaded", "ok");
+}
+
+function renderPolicy(p) {
+  const join = (arr) => (Array.isArray(arr) ? arr.join("\n") : "");
+  $("#inPatterns").value = join(p.blocked_input_patterns);
+  $("#inKeywords").value = join(p.blocked_input_keywords);
+  $("#outPatterns").value = join(p.blocked_output_patterns);
+  $("#outKeywords").value = join(p.blocked_output_keywords);
+  $("#harmful").value = join(p.harmful_content_patterns);
+  $("#maxInput").value = p.max_input_length ?? 4096;
+  $("#maxOutput").value = p.max_output_length ?? 8192;
+  $("#canonicalize").checked = p.canonicalization_enabled !== false;
+  $("#threeValued").checked = p.three_valued_monitoring !== false;
+
+  const dc = $("#disclaimers");
+  dc.innerHTML = "";
+  const disclaimers = p.disclaimers || {};
+  for (const topic of ["financial", "legal", "security", "geopolitics"]) {
+    const wrap = document.createElement("div");
+    wrap.className = "field";
+    wrap.innerHTML = '<label style="font-weight:600;color:var(--text-muted);font-size:12px;">' + topic + '</label>' +
+      '<textarea class="d" rows="3">' + escapeHtml(disclaimers[topic] || "") + '</textarea>';
+    dc.appendChild(wrap);
+  }
+
+  const checksEl = $("#checks");
+  checksEl.innerHTML = "";
+  const enabled = new Set(p.checks || []);
+  for (const c of ["canonicalize", "container_breakout", "prompt_injection", "leakage", "input_patterns", "input_length", "output_patterns", "output_length", "harmful_content", "pii_credentials", "data_exfiltration", "disclaimers", "system_prompt_leakage"]) {
+    const lab = document.createElement("label");
+    lab.className = "check-row";
+    lab.innerHTML = '<input type="checkbox" value="' + c + '" ' + (enabled.has(c) ? "checked" : "") + '> <span>' + c + '</span>';
+    checksEl.appendChild(lab);
+  }
+}
+
+function collectPolicy() {
+  const lines = (id) => $(id).value.split("\n").map(s => s.trim()).filter(Boolean);
+  const disclaimers = {};
+  const dTexts = document.querySelectorAll("#disclaimers .d");
+  ["financial", "legal", "security", "geopolitics"].forEach((topic, i) => {
+    disclaimers[topic] = dTexts[i]?.value.trim() || "";
+  });
+  const checks = Array.from($("#checks").querySelectorAll("input:checked")).map(i => i.value);
+  return {
+    name: currentPage,
+    version: "1.0.0",
+    description: "Per-page policy for " + escapeHtml(currentPage),
+    blocked_input_patterns: lines("#inPatterns"),
+    blocked_input_keywords: lines("#inKeywords"),
+    blocked_output_patterns: lines("#outPatterns"),
+    blocked_output_keywords: lines("#outKeywords"),
+    harmful_content_patterns: lines("#harmful"),
+    disclaimers,
+    max_input_length: parseInt($("#maxInput").value || "4096", 10) || 4096,
+    max_output_length: parseInt($("#maxOutput").value || "8192", 10) || 8192,
+    canonicalization_enabled: $("#canonicalize").checked,
+    three_valued_monitoring: $("#threeValued").checked,
+    checks,
+  };
+}
+
+async function savePolicy() {
+  const policy = collectPolicy();
+  btnSave.disabled = true;
+  btnSave.textContent = "Saving…";
+  const res = await fetchJson("/api/policies/" + encodeURIComponent(currentPage), {
+    method: "PUT", body: JSON.stringify(policy),
+  });
+  if (res.error) { setStatus("Save failed: " + res.error, "danger"); }
+  else { setStatus("Saved " + currentPage, "ok"); policies[currentPage] = policy; }
+  btnSave.disabled = false;
+  btnSave.textContent = "Save policy";
+}
+
+async function testGuardrail() {
+  const kind = $("#testKind").value;
+  const text = $("#testText").value;
+  const agent = $("#testAgent").value || "assistant";
+  if (!text.trim()) { alert("Enter text to validate"); return; }
+  btnTest.disabled = true;
+  btnTest.textContent = "Validating…";
+  testResult.style.display = "none";
+  try {
+    const res = await fetchJson("/api/validate/" + kind, {
+      method: "POST", body: JSON.stringify({ page: currentPage, text, agent }),
+    });
+    if (res.error) throw new Error(res.error);
+    renderTestResult(res);
+  } catch (e) {
+    testResult.style.display = "block";
+    testResult.className = "result blocked";
+    testResult.textContent = "Test failed: " + e.message;
+  } finally {
+    btnTest.disabled = false;
+    btnTest.textContent = "Run validation";
+  }
+}
+
+function renderTestResult(r) {
+  testResult.style.display = "block";
+  testResult.className = "result " + (r.safe ? "safe" : "blocked");
+  const out = r.safe ? (r.sanitized_output || r.sanitized_input || "") : "";
+  const lines = [
+    "safe:      " + r.safe,
+    "reason:    " + r.reason,
+    "blocked_by:" + (r.blocked_by || "N/A"),
+    "page:      " + r.page,
+    "agent:     " + r.agent,
+    "reported:  " + (r.reported === true),
+    "",
+    out ? "--- sanitized ---\n" + out : "",
+    "",
+    "--- checks ---",
+    ...Object.entries(r.checks || {}).map(([k, v]) => "  " + k + ": " + (v.safe ? "PASS" : "BLOCK") + " — " + v.reason),
+  ].filter(Boolean);
+  testResult.textContent = lines.join("\n");
+}
+
+async function loadStats() {
+  const data = await fetchJson("/api/stats");
+  if (data.error) return;
+  const s = $("#stats");
+  s.innerHTML = "";
+  const rows = [
+    ["total", data.total], ["passed", data.passed], ["blocked", data.blocked],
+    ["reported", data.reported], ["effectiveness", data.effectiveness + "%"],
+  ];
+  for (const [k, v] of rows) {
+    const el = document.createElement("div");
+    el.className = "stat";
+    el.innerHTML = '<div class="v">' + v + '</div><div class="l">' + k + '</div>';
+    s.appendChild(el);
+  }
+}
+
+async function loadEmergencyStatus() {
+  const res = await fetchJson("/api/emergency/status");
+  if (res.error) return;
+  const el = $("#emergencyStatus");
+  if (!el) return;
+  const e = res.emergency || {};
+  el.innerHTML =
+    '<div class="estat ' + (e.containment ? "on" : "off") + '"><div class="v">' + (e.containment ? "ACTIVE" : "Off") + '</div><div class="l">Containment</div></div>' +
+    '<div class="estat ' + (e.container_stopped ? "on" : "off") + '"><div class="v">' + (e.container_stopped ? "Stopped" : "Running") + '</div><div class="l">Containers</div></div>' +
+    '<div class="estat ' + (e.logs_preserved ? "on" : "off") + '"><div class="v">' + (e.logs_preserved ? "Yes" : "No") + '</div><div class="l">Logs preserved</div></div>' +
+    '<div class="estat ' + (e.shutdown ? "locked" : "off") + '"><div class="v">' + (e.shutdown ? "LOCKED" : "Open") + '</div><div class="l">Full shutdown</div></div>';
+
+  // Update stage button visual states
+  ["stage-1", "stage-2", "stage-3", "stage-4", "stage-all"].forEach(cls => {
+    const btn = document.querySelector("." + cls);
+    if (btn) btn.classList.remove("active");
+  });
+  if (e.containment) document.querySelector(".stage-1")?.classList.add("active");
+  if (e.container_stopped) document.querySelector(".stage-2")?.classList.add("active");
+  if (e.logs_preserved) document.querySelector(".stage-3")?.classList.add("active");
+  if (e.shutdown) document.querySelector(".stage-4")?.classList.add("active");
+}
+
+async function emergencyAction(action) {
+  if (!confirm("Emergency override: " + action.toUpperCase() + "\n\nThis will " + action + ".\n\nThis action is logged and cannot be undone without re-enablement.")) return;
+  const res = await fetchJson("/api/emergency/" + action, { method: "POST" });
+  if (res.error) { alert("Emergency action failed: " + res.error); return; }
+  alert("Emergency " + action + " completed successfully.");
+  loadEmergencyStatus();
+}
+
+async function emergencyReenable() {
+  const pw = prompt("Enter your admin password to re-enable the system:");
+  if (!pw) return;
+  let totp = prompt("Enter your 2FA code (TOTP or backup code):");
+  if (!totp) return;
+  const res = await fetchJson("/api/emergency/reenable", {
+    method: "POST",
+    body: JSON.stringify({ password: pw, totp_code: totp, backup_code: totp }),
+  });
+  if (res.error) { alert("Re-enable denied: " + res.error); return; }
+  alert("System re-enabled. You can now restart the server.");
+  loadEmergencyStatus();
+}
+
+// ── 2FA ──
+async function setup2fa() {
+  const res = await fetchJson("/api/auth/2fa/setup");
+  if (res.error) { alert("2FA setup failed: " + res.error); return; }
+  const dlg = document.createElement("div");
+  dlg.className = "modal-overlay open";
+  dlg.innerHTML =
+    '<div class="modal">' +
+    '<button class="modal-close" onclick="this.closest(\'.modal-overlay\').remove()">&times;</button>' +
+    '<h2>🔐 Set up 2FA</h2>' +
+    '<p>Scan this QR code with Google Authenticator, Authy, or any TOTP app.</p>' +
+    '<div class="qr-box"><pre style="font-size:10px;color:var(--text-muted);margin:0;background:#05070a;padding:8px;border-radius:6px;overflow:auto;">' + res.uri + '</pre></div>' +
+    '<div class="secret-box"><strong>Secret key:</strong> ' + res.secret + '</div>' +
+    '<div class="backup-box"><strong>Backup codes (save these!):</strong><br>' + res.backup_codes.join('  ') + '<br><small style="opacity:0.7;">Each code can be used once.</small></div>' +
+    '<div style="margin-top:20px;"><button class="btn primary" onclick="this.closest(\'.modal-overlay\').remove()">I\'ve saved my codes</button></div>' +
+    '</div>';
+  document.body.appendChild(dlg);
+}
+
+async function check2faStatus() {
+  const res = await fetchJson("/api/auth/2fa/status");
+  if (res.error) return;
+  if (btn2faBtn) {
+    btn2faBtn.textContent = res["2fa_configured"] ? "2FA: Enabled" : "Set up 2FA";
+    btn2faBtn.onclick = res["2fa_configured"] ? null : setup2fa;
+  }
+}
+
+function escapeHtml(str) {
+  return String(str ?? "").replace(/[&<>\"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c]));
+}
+
+window.DEFAULT_POLICY = {
+  name: "default", version: "1.0.0",
+  blocked_input_patterns: [],
+  blocked_input_keywords: [],
+  blocked_output_patterns: [],
+  blocked_output_keywords: [],
+  harmful_content_patterns: [],
+  disclaimers: {},
+  max_input_length: 4096, max_output_length: 8192,
+  canonicalization_enabled: true, three_valued_monitoring: true,
+  checks: CHECKS.slice(),
+};
+
+// Initialize model selection and 2FA status
+loadProviders();
+loadSelectedModel();
+check2faStatus();
+loadEmergencyStatus();
+
+</script>

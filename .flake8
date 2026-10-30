@@ -1,0 +1,20 @@
+[flake8]
+max-line-length = 100
+max-complexity = 18
+select = E,W,F,C,B,N
+ignore = E203, E266, E501, W503, F401, F403, C408, B008, B018
+per-file-ignores =
+    __init__.py: F401
+    tests/*.py: F401, F403, W503
+exclude =
+    .git,
+    __pycache__,
+    *.pyc,
+    rust/target,
+    node_modules,
+    logs,
+    .venv,
+    venv,
+    build,
+    dist,
+    *.egg-info

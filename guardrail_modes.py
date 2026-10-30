@@ -139,11 +139,14 @@ class ModeledGuardrail:
 
     def validate_output(self, model_output: str, page_id: str = "default",
                         agent_name: str = "assistant") -> Dict[str, Any]:
-        result = self.engine.validate_output(model_output, page_id, agent_name)
+        # In TRAINING mode, never trigger the kill switch — record only.
+        trigger_ks = self.mode != GuardrailMode.TRAINING
+        result = self.engine.validate_output(model_output, page_id, agent_name,
+                                             trigger_kill_switch=trigger_ks)
         result["mode"] = self.mode.value
 
         if self.mode == GuardrailMode.TRAINING:
-            engine_raw = self.engine.validate_output(model_output, page_id, agent_name)
+            engine_raw = result  # already computed above, no second call
             result["safe"] = True
             result["reason"] = "TRAINING: recorded, not blocked"
             result["would_block"] = not engine_raw["safe"]
@@ -161,7 +164,7 @@ class ModeledGuardrail:
             result["training_sample"] = sample
 
         elif self.mode == GuardrailMode.TESTING:
-            engine_raw = self.engine.validate_output(model_output, page_id, agent_name)
+            engine_raw = result  # already computed above
             result["engine_raw"] = {
                 "safe": engine_raw["safe"],
                 "reason": engine_raw["reason"],

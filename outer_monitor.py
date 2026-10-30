@@ -160,6 +160,7 @@ class OuterMonitor:
             "model": os.environ.get("TRUSTED_MODEL_MODEL", "trusted-model"),
             "endpoint": os.environ.get("TRUSTED_MODEL_ENDPOINT", "chat"),
             "timeout": int(os.environ.get("TRUSTED_MODEL_TIMEOUT", "30")),
+            "api_key": os.environ.get("TRUSTED_MODEL_API_KEY", ""),
         })
 
         # LLM-based classifier second-opinion layer (regex + classifier =
@@ -284,12 +285,15 @@ class OuterMonitor:
                 result["sanitized_input"] = ""
 
         # Trusted model audits the outer monitor's review (bootstrapped monitoring).
-        # If the trusted model flags the review as rubber-stamping/collusion,
-        # treat the decision as suspect and block.
-        if self.outside_model.enabled and result["safe"] is False \
-                and result.get("blocked_by") == "outside_model":
+        # Audits both approve and block decisions: rubber-stamping (approving
+        # harmful content) is just as dangerous as an incorrect block.
+        # Skip when the outside model was unreachable (fail-open): there's no
+        # real review to audit.
+        outside_review = audit.get("outside_review", {})
+        if (self.outside_model.enabled and outside_review
+                and "unreachable" not in outside_review.get("reason", "")):
             trusted = self._audit_with_trusted_model(
-                "input", user_input, agent_name, audit.get("outside_review", {}))
+                "input", user_input, agent_name, outside_review)
             audit["trusted_audit"] = trusted
             self.qc_stats["trusted_audits"] += 1
             if trusted.get("flagged", True):
@@ -423,11 +427,15 @@ class OuterMonitor:
                 result["sanitized_output"] = ""
 
         # Trusted model audits the outer monitor's review (bootstrapped monitoring).
-        if self.outside_model.enabled and result["safe"] is False \
-                and result.get("blocked_by") == "outside_model":
+        # Audits both approve and block decisions: rubber-stamping (approving
+        # harmful content) is just as dangerous as an incorrect block.
+        # Skip when the outside model was unreachable (fail-open): there's no
+        # real review to audit.
+        outside_review = audit.get("outside_review", {})
+        if (self.outside_model.enabled and outside_review
+                and "unreachable" not in outside_review.get("reason", "")):
             trusted = self._audit_with_trusted_model(
-                "output", model_output, agent_name,
-                audit.get("outside_review", {}))
+                "output", model_output, agent_name, outside_review)
             audit["trusted_audit"] = trusted
             self.qc_stats["trusted_audits"] += 1
             if trusted.get("flagged", True):
