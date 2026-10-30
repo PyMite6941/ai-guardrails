@@ -30,6 +30,9 @@ import json
 import os
 import subprocess
 import sys
+import time
+import uuid
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -135,6 +138,465 @@ canary = GuardrailCanary(engine=engine)
 risk_tracker = get_tracker()
 integrity_watcher = get_watcher()
 current_mode = load_mode()
+
+# ── Paths ──
+LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+os.makedirs(LOGS_DIR, exist_ok=True)
+
+# ── Chat / Agentic harness ──────────────────────────────────────────────
+# ChatGPT-style interface with agentic capabilities.
+# Every agent turn is validated through the guardrail engine before
+# reaching the user. All conversations are persisted for audit.
+
+CHAT_SESSIONS_DIR = os.path.join(LOGS_DIR, "chat")
+os.makedirs(CHAT_SESSIONS_DIR, exist_ok=True)
+
+AGENT_TOOLS: Dict[str, Dict[str, Any]] = {
+    "guardrail_validate": {
+        "name": "guardrail_validate",
+        "description": "Validate text through the AI guardrails (input/output checks).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Text to validate"},
+                "kind": {"type": "string", "enum": ["input", "output"], "default": "input"},
+                "page": {"type": "string", "default": "default"},
+                "agent": {"type": "string", "default": "assistant"},
+            },
+            "required": ["text"],
+        },
+    },
+    "file_read": {
+        "name": "file_read",
+        "description": "Read a file from the local filesystem (read-only).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path to read"},
+            },
+            "required": ["path"],
+        },
+    },
+    "system_info": {
+        "name": "system_info",
+        "description": "Get system information (OS, Python version, uptime).",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    "emergency_contain": {
+        "name": "emergency_contain",
+        "description": "Trigger emergency containment (stage 1) — blocks the API port.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+}
+
+
+class ChatMessage:
+    """A single message in a chat session."""
+
+    def __init__(self, role: str, content: str,
+                 timestamp: Optional[float] = None,
+                 tool_calls: Optional[List[Dict]] = None,
+                 tool_results: Optional[List[Dict]] = None):
+        self.role = role
+        self.content = content
+        self.timestamp = timestamp or time.time()
+        self.tool_calls = tool_calls or []
+        self.tool_results = tool_results or []
+
+    def to_dict(self) -> Dict[str, Any]:
+        d: Dict[str, Any] = {
+            "role": self.role,
+            "content": self.content,
+            "timestamp": self.timestamp,
+        }
+        if self.tool_calls:
+            d["tool_calls"] = self.tool_calls
+        if self.tool_results:
+            d["tool_results"] = self.tool_results
+        return d
+
+
+class ChatSession:
+    """A chat session with messages, model, and agent mode."""
+
+    def __init__(self, session_id: str, title: str = "New Chat",
+                 model: str = "ollama"):
+        self.id = session_id
+        self.title = title
+        self.model = model
+        self.created_at = time.time()
+        self.updated_at = time.time()
+        self.messages: List[ChatMessage] = []
+        self.system_prompt = ""
+        self.agent_mode = False
+
+    def to_dict(self, include_messages: bool = False) -> Dict[str, Any]:
+        d: Dict[str, Any] = {
+            "id": self.id,
+            "title": self.title,
+            "model": self.model,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "system_prompt": self.system_prompt,
+            "agent_mode": self.agent_mode,
+            "message_count": len(self.messages),
+        }
+        if include_messages:
+            d["messages"] = [m.to_dict() for m in self.messages]
+        return d
+
+    def add_message(self, role: str, content: str,
+                    tool_calls: Optional[List[Dict]] = None,
+                    tool_results: Optional[List[Dict]] = None) -> ChatMessage:
+        msg = ChatMessage(role, content, tool_calls=tool_calls,
+                          tool_results=tool_results)
+        self.messages.append(msg)
+        self.updated_at = time.time()
+        return msg
+
+    def save(self) -> None:
+        path = os.path.join(CHAT_SESSIONS_DIR, f"{self.id}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({
+                "id": self.id,
+                "title": self.title,
+                "model": self.model,
+                "created_at": self.created_at,
+                "updated_at": self.updated_at,
+                "system_prompt": self.system_prompt,
+                "agent_mode": self.agent_mode,
+                "messages": [m.to_dict() for m in self.messages],
+            }, f, indent=2)
+
+    @classmethod
+    def load(cls, session_id: str) -> Optional["ChatSession"]:
+        path = os.path.join(CHAT_SESSIONS_DIR, f"{session_id}.json")
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return None
+        session = cls(data["id"], data.get("title", "New Chat"),
+                      data.get("model", "ollama"))
+        session.created_at = data.get("created_at", time.time())
+        session.updated_at = data.get("updated_at", time.time())
+        session.system_prompt = data.get("system_prompt", "")
+        session.agent_mode = data.get("agent_mode", False)
+        session.messages = [
+            ChatMessage(m["role"], m["content"],
+                        m.get("timestamp"),
+                        m.get("tool_calls"),
+                        m.get("tool_results"))
+            for m in data.get("messages", [])
+        ]
+        return session
+
+    @classmethod
+    def list_all(cls) -> List[Dict[str, Any]]:
+        sessions: List[Dict[str, Any]] = []
+        if os.path.isdir(CHAT_SESSIONS_DIR):
+            for name in os.listdir(CHAT_SESSIONS_DIR):
+                if name.endswith(".json"):
+                    session_id = name[:-5]
+                    session = cls.load(session_id)
+                    if session:
+                        sessions.append(session.to_dict())
+        sessions.sort(key=lambda s: s.get("updated_at", 0), reverse=True)
+        return sessions
+
+
+# In-memory session cache
+_chat_sessions: Dict[str, ChatSession] = {}
+
+
+def get_chat_session(session_id: str) -> Optional[ChatSession]:
+    if session_id in _chat_sessions:
+        return _chat_sessions[session_id]
+    session = ChatSession.load(session_id)
+    if session:
+        _chat_sessions[session_id] = session
+    return session
+
+
+def create_chat_session(title: str = "New Chat",
+                        model: str = "ollama") -> ChatSession:
+    session_id = str(uuid.uuid4())[:8]
+    session = ChatSession(session_id, title, model)
+    _chat_sessions[session_id] = session
+    session.save()
+    return session
+
+
+def delete_chat_session(session_id: str) -> bool:
+    path = os.path.join(CHAT_SESSIONS_DIR, f"{session_id}.json")
+    if os.path.exists(path):
+        os.remove(path)
+        _chat_sessions.pop(session_id, None)
+        return True
+    return False
+
+
+def execute_agent_tool(tool_name: str, arguments: Dict[str, Any],
+                       session_token: Optional[str] = None) -> Dict[str, Any]:
+    """Execute an agent tool with guardrail validation.
+
+    Every tool call is validated through the guardrail engine before
+    execution. Returns the tool result or a blocked response.
+    """
+    if tool_name not in AGENT_TOOLS:
+        return {"error": f"Unknown tool: {tool_name}"}
+
+    args = arguments or {}
+
+    # ── Guardrail validation on tool arguments ──
+    # Validate the tool name and key arguments through input guardrails
+    validation_text = f"Tool: {tool_name} | Args: {json.dumps(args)[:500]}"
+    validation = engine.validate_input(validation_text, page_id="agent-tools",
+                                       agent_name="agent")
+    if not validation["safe"]:
+        return {
+            "blocked": True,
+            "reason": validation["reason"],
+            "blocked_by": validation["blocked_by"],
+        }
+
+    # ── Execute tool ──
+    try:
+        if tool_name == "guardrail_validate":
+            text = args.get("text", "")
+            kind = args.get("kind", "input")
+            page = args.get("page", "default")
+            agent = args.get("agent", "assistant")
+            if kind == "output":
+                result = engine.validate_output(text, page, agent)
+            else:
+                result = engine.validate_input(text, page, agent)
+            return {
+                "safe": result["safe"],
+                "reason": result["reason"],
+                "blocked_by": result.get("blocked_by"),
+                "censored": result.get("censored", False),
+                "sanitized": result.get("sanitized_input") or result.get("sanitized_output", ""),
+            }
+
+        elif tool_name == "file_read":
+            file_path = args.get("path", "")
+            # Resolve and validate path — only allow within project dir
+            project_dir = os.path.dirname(os.path.abspath(__file__))
+            resolved = os.path.realpath(file_path)
+            if not resolved.startswith(os.path.realpath(project_dir)):
+                return {"error": "File access restricted to project directory"}
+            if not os.path.exists(resolved):
+                return {"error": f"File not found: {file_path}"}
+            if os.path.isdir(resolved):
+                return {"error": f"Path is a directory: {file_path}"}
+            # Check file size
+            size = os.path.getsize(resolved)
+            if size > 1_000_000:
+                return {"error": "File too large (>1MB)"}
+            try:
+                with open(resolved, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except UnicodeDecodeError:
+                with open(resolved, "rb") as f:
+                    content = f.read(5000).hex()
+                return {"content": content[:5000],
+                        "note": "Binary file, shown as hex (first 5000 bytes)"}
+            return {"content": content, "path": resolved, "size": size}
+
+        elif tool_name == "system_info":
+            import platform
+            return {
+                "os": platform.platform(),
+                "python": platform.python_version(),
+                "hostname": platform.node(),
+                "arch": platform.machine(),
+                "uptime_seconds": time.time() - psutil_boot_time(),
+            }
+
+        elif tool_name == "emergency_contain":
+            script = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "scripts", "emergency-override.sh",
+            )
+            result = subprocess.run(
+                ["bash", script, "contain"],
+                capture_output=True, text=True, timeout=30,
+            )
+            return {
+                "ok": result.returncode == 0,
+                "message": "containment activated" if result.returncode == 0
+                else result.stderr[:200],
+            }
+
+    except Exception as e:
+        return {"error": str(e)}
+
+    return {"error": f"Tool {tool_name} not implemented"}
+
+
+def psutil_boot_time() -> float:
+    """Get system boot time without psutil dependency."""
+    try:
+        with open("/proc/uptime", "r") as f:
+            uptime = float(f.read().split()[0])
+        return time.time() - uptime
+    except Exception:
+        return 0.0
+
+
+def agentic_plan_and_act(user_text: str, session: ChatSession,
+                         session_token: Optional[str] = None) -> Dict[str, Any]:
+    """Run an agentic plan-act-review loop.
+
+    1. Validate user input through guardrails
+    2. Agent decides which tool to call (plan)
+    3. Execute tool with validation (act)
+    4. Review results and generate response
+    5. Validate output through guardrails
+
+    Returns the final assistant response and execution trace.
+    """
+    trace: List[Dict[str, Any]] = []
+
+    # Step 1: Validate input
+    input_validation = engine.validate_input(
+        user_text, page_id="chat-agent", agent_name="agent"
+    )
+    trace.append({"step": "input_validation", "result": input_validation})
+    if not input_validation["safe"]:
+        output = (f"I cannot process that request. "
+                  f"{input_validation['reason']}")
+        output_validation = engine.validate_output(
+            output, page_id="chat-agent", agent_name="assistant"
+        )
+        session.add_message("assistant", output)
+        session.save()
+        return {
+            "response": output,
+            "safe": False,
+            "blocked_by": input_validation.get("blocked_by"),
+            "trace": trace,
+        }
+
+    # Step 2: Agent planning — decide tool to use
+    # Build a planning prompt
+    tool_list = "\n".join(
+        f"- {name}: {info['description']}"
+        for name, info in AGENT_TOOLS.items()
+    )
+    plan_prompt = (
+        f"You are an AI assistant with guardrails. The user said: '{user_text}'\n"
+        f"Available tools:\n{tool_list}\n"
+        f"Decide which tool (if any) to use. Respond with ONLY the tool name "
+        f"and arguments as JSON, or 'none' if no tool is needed."
+    )
+    plan_validation = engine.validate_input(
+        plan_prompt, page_id="chat-agent-plan", agent_name="agent"
+    )
+    trace.append({"step": "plan_validation", "result": plan_validation})
+
+    # For now, use a heuristic: if the text mentions specific keywords,
+    # route to appropriate tools. This avoids needing an external model
+    # for planning while still being agentic.
+    tool_name = "none"
+    tool_args: Dict[str, Any] = {}
+
+    text_lower = user_text.lower()
+    if "validate" in text_lower or "guardrail" in text_lower:
+        tool_name = "guardrail_validate"
+        tool_args = {"text": user_text, "kind": "input"}
+    elif "file" in text_lower and ("read" in text_lower or "open" in text_lower):
+        # Extract potential file path
+        tool_name = "file_read"
+        tool_args = {"path": user_text}
+    elif "system" in text_lower or "info" in text_lower:
+        tool_name = "system_info"
+        tool_args = {}
+    elif "contain" in text_lower or "emergency" in text_lower:
+        tool_name = "emergency_contain"
+        tool_args = {}
+
+    trace.append({"step": "plan", "tool": tool_name, "args": tool_args})
+
+    # Step 3: Act — execute tool if selected
+    tool_result: Optional[Dict[str, Any]] = None
+    if tool_name != "none":
+        tool_result = execute_agent_tool(tool_name, tool_args, session_token)
+        trace.append({"step": "act", "tool": tool_name, "result": tool_result})
+
+        # Validate tool output if it contains text
+        if tool_result and not tool_result.get("error") \
+                and not tool_result.get("blocked"):
+            output_text = json.dumps(tool_result)[:2000]
+            output_validation = engine.validate_output(
+                output_text, page_id="chat-agent-tool", agent_name="assistant"
+            )
+            trace.append({"step": "tool_output_validation",
+                          "result": output_validation})
+            if not output_validation["safe"]:
+                tool_result["blocked_by_tool_output"] = True
+
+    # Step 4: Generate final response
+    if tool_result and tool_result.get("blocked"):
+        response = (f"I was blocked from using the {tool_name} tool. "
+                    f"Reason: {tool_result.get('reason', 'unknown')}")
+    elif tool_result and tool_result.get("error"):
+        response = f"Tool error: {tool_result['error']}"
+    elif tool_result:
+        # Summarize tool result
+        if tool_name == "guardrail_validate":
+            safe = tool_result.get("safe", False)
+            reason = tool_result.get("reason", "")
+            response = (f"Guardrail validation: {'SAFE' if safe else 'BLOCKED'}\n"
+                        f"Reason: {reason}")
+        elif tool_name == "file_read":
+            content = tool_result.get("content", "")
+            response = f"File contents:\n\n{content[:2000]}"
+        elif tool_name == "system_info":
+            response = f"System info:\n{json.dumps(tool_result, indent=2)}"
+        elif tool_name == "emergency_contain":
+            response = f"Emergency containment: {tool_result.get('message', '')}"
+        else:
+            response = f"Tool result: {json.dumps(tool_result, indent=2)}"
+    else:
+        response = (f"I understand: {user_text[:200]}...\n"
+                    f"I'm running in agentic mode with guardrails enabled. "
+                    f"Tell me what you'd like me to do — validate text, read "
+                    f"files, check system info, or trigger emergency containment.")
+
+    # Step 5: Validate output through guardrails
+    output_validation = engine.validate_output(
+        response, page_id="chat-agent", agent_name="assistant"
+    )
+    trace.append({"step": "output_validation", "result": output_validation})
+
+    if not output_validation["safe"]:
+        response = (f"My response was blocked by output guardrails. "
+                    f"{output_validation['reason']}")
+
+    session.add_message("assistant", response,
+                        tool_calls=[{"name": tool_name, "arguments": tool_args}]
+                        if tool_name != "none" else None,
+                        tool_results=[tool_result] if tool_result else None)
+    session.save()
+
+    return {
+        "response": response,
+        "safe": output_validation["safe"],
+        "blocked_by": output_validation.get("blocked_by"),
+        "trace": trace,
+    }
 
 
 def _json_response(handler, status, payload,
@@ -251,6 +713,10 @@ class Handler(BaseHTTPRequestHandler):
         # and a setup wizard when no password is configured yet.
         if path == "/" or path == "/login":
             self._serve_file(os.path.join(WEB_DIR, "index.html"),
+                             "text/html", extra_headers=cors_headers)
+            return
+        if path == "/chat":
+            self._serve_file(os.path.join(WEB_DIR, "chat.html"),
                              "text/html", extra_headers=cors_headers)
             return
         if path.startswith("/api/policies"):
@@ -426,6 +892,35 @@ class Handler(BaseHTTPRequestHandler):
             assistant = get_assistant()
             _json_response(self, 200, assistant.get_policy(page_id), cors_headers)
             return
+        # ── Chat endpoints (GET) ───────────────────────────────────
+        if path == "/api/chat/sessions":
+            sessions = ChatSession.list_all()
+            _json_response(self, 200, {"sessions": sessions, "count": len(sessions)},
+                           cors_headers)
+            return
+        if path == "/api/chat/tools":
+            _json_response(self, 200, {
+                "tools": [
+                    {
+                        "name": name,
+                        "description": info["description"],
+                        "parameters": info["parameters"],
+                    }
+                    for name, info in AGENT_TOOLS.items()
+                ],
+            }, cors_headers)
+            return
+        if path.startswith("/api/chat/sessions/"):
+            session_id = path.split("/")[-1]
+            session = get_chat_session(session_id)
+            if not session:
+                _json_response(self, 404, {"error": "session not found"},
+                               cors_headers)
+                return
+            include_messages = self.headers.get("X-Include-Messages", "false").lower() == "true"
+            _json_response(self, 200, session.to_dict(include_messages=include_messages),
+                           cors_headers)
+            return
         _json_response(self, 404, {"error": "not found"}, cors_headers)
 
     def do_PUT(self):  # noqa: N802
@@ -505,6 +1000,19 @@ class Handler(BaseHTTPRequestHandler):
                                        "removed": removed},
                            cors_headers,
                            session_token=result.session_token)
+            return
+        if len(segments) == 3 and segments[1] == "chat" and segments[2] != "sessions":
+            session_id = segments[2]
+            # Extract just the session ID (remove any trailing parts)
+            session_id = session_id.split("?")[0]
+            if delete_chat_session(session_id):
+                _json_response(self, 200, {"ok": True, "session_id": session_id,
+                                           "removed": True},
+                               cors_headers,
+                               session_token=result.session_token)
+            else:
+                _json_response(self, 404, {"error": "session not found"},
+                               cors_headers)
             return
         _json_response(self, 404, {"error": "not found"}, cors_headers)
 
@@ -997,6 +1505,111 @@ class Handler(BaseHTTPRequestHandler):
             )
             _json_response(self, 200 if result["ok"] else 403, result,
                            cors_headers)
+            return
+
+        # ── Chat endpoints (POST) ──────────────────────────────────
+        if path == "/api/chat/sessions":
+            try:
+                body = json.loads(self._read_body() or b"{}")
+            except json.JSONDecodeError:
+                _json_response(self, 400, {"error": "invalid json"},
+                               cors_headers)
+                return
+            title = body.get("title", "New Chat")
+            model = body.get("model", "ollama")
+            agent_mode = body.get("agent_mode", False)
+            session = create_chat_session(title=title, model=model)
+            session.agent_mode = agent_mode
+            session.save()
+            _json_response(self, 200, session.to_dict(), cors_headers)
+            return
+
+        if path == "/api/chat/message":
+            try:
+                body = json.loads(self._read_body() or b"{}")
+            except json.JSONDecodeError:
+                _json_response(self, 400, {"error": "invalid json"},
+                               cors_headers)
+                return
+            session_id = body.get("session_id", "")
+            text = body.get("text", "")
+            model = body.get("model", "ollama")
+            agent_mode = body.get("agent_mode", False)
+            system_prompt = body.get("system_prompt", "")
+
+            if not session_id:
+                # Create a new session
+                session = create_chat_session(title=text[:50] or "New Chat",
+                                              model=model)
+                session.agent_mode = agent_mode
+                session.system_prompt = system_prompt
+                session.save()
+                session_id = session.id
+            else:
+                session = get_chat_session(session_id)
+                if not session:
+                    _json_response(self, 404, {"error": "session not found"},
+                                   cors_headers)
+                    return
+                session.model = model
+                session.agent_mode = agent_mode
+                session.system_prompt = system_prompt
+
+            # Validate session access (auth required for state-changing)
+            session_token = self.headers.get("X-Session-Token", "") or \
+                self.headers.get("Cookie", "").replace("session=", "", 1)
+            sess = validate_session(session_token) if session_token else None
+            if not sess:
+                _json_response(self, 401, {"error": "authentication required"},
+                               cors_headers)
+                return
+
+            # Add user message
+            session.add_message("user", text)
+            session.save()
+
+            # Process based on mode
+            if agent_mode:
+                result = agentic_plan_and_act(text, session, session_token)
+            else:
+                # Regular chat: validate input, generate response
+                input_validation = engine.validate_input(
+                    text, page_id="chat", agent_name="user"
+                )
+                if not input_validation["safe"]:
+                    response = (f"I cannot process that message. "
+                                f"{input_validation['reason']}")
+                else:
+                    response = (f"I received: '{text[:200]}'\n"
+                                f"I'm running in chat mode with guardrails. "
+                                f"Enable agent mode to use tools (validate, "
+                                f"file_read, system_info, emergency_contain).")
+                # Validate output
+                output_validation = engine.validate_output(
+                    response, page_id="chat", agent_name="assistant"
+                )
+                if not output_validation["safe"]:
+                    response = (f"My response was blocked by output guardrails. "
+                                f"{output_validation['reason']}")
+                result = {
+                    "response": response,
+                    "safe": output_validation["safe"],
+                    "blocked_by": output_validation.get("blocked_by"),
+                    "trace": [{"step": "input_validation",
+                               "result": input_validation}],
+                }
+
+            # Add assistant response
+            session.add_message("assistant", result["response"])
+            session.save()
+
+            _json_response(self, 200, {
+                "session_id": session_id,
+                "response": result["response"],
+                "safe": result["safe"],
+                "blocked_by": result.get("blocked_by"),
+                "trace": result.get("trace", []),
+            }, cors_headers, session_token=session_token)
             return
 
         # ── Setup password (initial configuration, no auth needed) ──
