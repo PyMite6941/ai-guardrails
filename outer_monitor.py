@@ -40,6 +40,16 @@ from guardrail_risk import get_tracker
 from guardrail_classifier import GuardrailClassifier, ClassifierConfig
 from guardrail_human_loop import HumanLoopEscalator, HumanLoopConfig
 
+
+def _env(name: str, default: str = "") -> str:
+    """Read an env var, accepting the documented GUARDRAIL_ prefix too.
+
+    .env.example documents GUARDRAIL_CLASSIFIER_* / GUARDRAIL_TRUSTED_MODEL_*,
+    while older code read the bare names. Both work, so following either
+    document actually configures the model layer.
+    """
+    return os.environ.get("GUARDRAIL_" + name, os.environ.get(name, default))
+
 LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 AUDIT_LOG = os.path.join(LOGS_DIR, "outer_monitor_audit.jsonl")
 OUTER_REVIEW_LOG = os.path.join(LOGS_DIR, "outer_model_reviews.jsonl")
@@ -154,29 +164,31 @@ class OuterMonitor:
         #   TRUSTED_MODEL_MODEL=trusted-model
         #   TRUSTED_MODEL_ENDPOINT=chat
         self.trusted_model = TrustedModelConfig({
-            "enabled": os.environ.get("TRUSTED_MODEL_ENABLED", "0") == "1",
-            "base_url": os.environ.get("TRUSTED_MODEL_BASE_URL",
-                                       "http://localhost:8000").rstrip("/"),
-            "model": os.environ.get("TRUSTED_MODEL_MODEL", "trusted-model"),
-            "endpoint": os.environ.get("TRUSTED_MODEL_ENDPOINT", "chat"),
-            "timeout": int(os.environ.get("TRUSTED_MODEL_TIMEOUT", "30")),
-            "api_key": os.environ.get("TRUSTED_MODEL_API_KEY", ""),
+            "enabled": _env("TRUSTED_MODEL_ENABLED", "0") == "1",
+            "base_url": _env("TRUSTED_MODEL_BASE_URL",
+                             "http://localhost:8000").rstrip("/"),
+            "model": _env("TRUSTED_MODEL_MODEL", "trusted-model"),
+            "endpoint": _env("TRUSTED_MODEL_ENDPOINT", "chat"),
+            "timeout": int(_env("TRUSTED_MODEL_TIMEOUT", "30")),
+            "api_key": _env("TRUSTED_MODEL_API_KEY", ""),
         })
 
-        # LLM-based classifier second-opinion layer (regex + classifier =
-        # ~94% catch / ~1.1% FP per Kalvium Labs research). Runs after the
-        # deterministic engine passes. Configured via env:
+        # LLM-based classifier second-opinion layer. Runs after the
+        # deterministic engine passes, and can only escalate (never release)
+        # a decision. Configured via env:
         #   CLASSIFIER_ENABLED=1
-        #   CLASSIFIER_BASE_URL=http://localhost:8000
-        #   CLASSIFIER_MODEL=classifier-model
-        #   CLASSIFIER_ENDPOINT=chat
+        #   CLASSIFIER_BASE_URL=https://api.tokenfactory.nebius.com/v1
+        #   CLASSIFIER_MODEL=<nemotron model id>
+        #   CLASSIFIER_API_KEY=<nebius token>
+        #   CLASSIFIER_API_STYLE=auto|openai|ollama
         self.classifier = GuardrailClassifier(ClassifierConfig({
-            "enabled": os.environ.get("CLASSIFIER_ENABLED", "0") == "1",
-            "base_url": os.environ.get("CLASSIFIER_BASE_URL",
-                                       "http://localhost:8000").rstrip("/"),
-            "model": os.environ.get("CLASSIFIER_MODEL", "classifier-model"),
-            "endpoint": os.environ.get("CLASSIFIER_ENDPOINT", "chat"),
-            "timeout": int(os.environ.get("CLASSIFIER_TIMEOUT", "20")),
+            "enabled": _env("CLASSIFIER_ENABLED", "0") == "1",
+            "base_url": _env("CLASSIFIER_BASE_URL", "http://localhost:8000").rstrip("/"),
+            "model": _env("CLASSIFIER_MODEL", "classifier-model"),
+            "endpoint": _env("CLASSIFIER_ENDPOINT", "chat"),
+            "api_style": _env("CLASSIFIER_API_STYLE", "auto"),
+            "api_key": _env("CLASSIFIER_API_KEY", ""),
+            "timeout": int(_env("CLASSIFIER_TIMEOUT", "20")),
         }))
 
         # Human-in-the-loop escalation for risky conversations (medium+ risk

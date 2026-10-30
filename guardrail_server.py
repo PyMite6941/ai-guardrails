@@ -62,9 +62,19 @@ from guardrail_auth import (
     ADMIN_API_KEY, VIEW_API_KEY, ALLOWED_IPS, ALLOWED_ORIGINS,
     RATE_LIMIT, MAX_BODY_SIZE, BIND_HOST,
     _log_auth_event,
+    _record_login_attempt,
+    verify_user_backup_code, enable_user_2fa, disable_user_2fa,
+    enable_2fa, disable_2fa,
 )
 
 HOST = os.environ.get("GUARDRAIL_HOST", BIND_HOST)
+
+
+def _env(name: str, default: str = "") -> str:
+    """Read an env var, accepting the documented GUARDRAIL_ prefix too."""
+    return os.environ.get("GUARDRAIL_" + name, os.environ.get(name, default))
+
+
 PORT = int(os.environ.get("GUARDRAIL_PORT", "8083"))
 
 # Load provider API keys from .env into the environment (for cloud models).
@@ -98,12 +108,12 @@ engine = GuardrailEngine(policies_dir=DEFAULT_POLICIES_DIR,
 #   OUTSIDE_MODEL_MODEL=qwen2.5:1.5b
 #   OUTSIDE_MODEL_ENDPOINT=generate   (or "chat")
 _outside = OutsideModelConfig({
-    "enabled": os.environ.get("OUTSIDE_MODEL_ENABLED", "0") == "1",
-    "base_url": os.environ.get("OUTSIDE_MODEL_BASE_URL", "http://localhost:11434"),
-    "model": os.environ.get("OUTSIDE_MODEL_MODEL", "qwen2.5:1.5b"),
-    "endpoint": os.environ.get("OUTSIDE_MODEL_ENDPOINT", "generate"),
-    "timeout": int(os.environ.get("OUTSIDE_MODEL_TIMEOUT", "30")),
-    "api_key": os.environ.get("OUTSIDE_MODEL_API_KEY", ""),
+    "enabled": _env("OUTSIDE_MODEL_ENABLED", "0") == "1",
+    "base_url": _env("OUTSIDE_MODEL_BASE_URL", "http://localhost:11434"),
+    "model": _env("OUTSIDE_MODEL_MODEL", "qwen2.5:1.5b"),
+    "endpoint": _env("OUTSIDE_MODEL_ENDPOINT", "generate"),
+    "timeout": int(_env("OUTSIDE_MODEL_TIMEOUT", "30")),
+    "api_key": _env("OUTSIDE_MODEL_API_KEY", ""),
 })
 monitor = OuterMonitor(engine=engine,
                        outside_model_config=_outside,
@@ -112,13 +122,13 @@ monitor = OuterMonitor(engine=engine,
 
 # Aggregated status subsystem instances (observability endpoint).
 classifier = GuardrailClassifier(ClassifierConfig({
-    "enabled": os.environ.get("CLASSIFIER_ENABLED", "0") == "1",
-    "base_url": os.environ.get("CLASSIFIER_BASE_URL",
-                               "http://localhost:8000").rstrip("/"),
-    "model": os.environ.get("CLASSIFIER_MODEL", "classifier-model"),
-    "endpoint": os.environ.get("CLASSIFIER_ENDPOINT", "chat"),
-    "timeout": int(os.environ.get("CLASSIFIER_TIMEOUT", "20")),
-    "api_key": os.environ.get("CLASSIFIER_API_KEY", ""),
+    "enabled": _env("CLASSIFIER_ENABLED", "0") == "1",
+    "base_url": _env("CLASSIFIER_BASE_URL", "http://localhost:8000").rstrip("/"),
+    "model": _env("CLASSIFIER_MODEL", "classifier-model"),
+    "endpoint": _env("CLASSIFIER_ENDPOINT", "chat"),
+    "api_style": _env("CLASSIFIER_API_STYLE", "auto"),
+    "timeout": int(_env("CLASSIFIER_TIMEOUT", "20")),
+    "api_key": _env("CLASSIFIER_API_KEY", ""),
 }))
 human_loop = HumanLoopEscalator(HumanLoopConfig({
     "enabled": os.environ.get("HUMAN_LOOP_ENABLED", "0") == "1",
@@ -322,31 +332,55 @@ class Handler(BaseHTTPRequestHandler):
                            {"outer_review": monitor.get_outer_review_log(limit)},
                            cors_headers)
             return
+        # ── User and API-key administration (GET) ────────────────
+        if path == "/api/users":
+            from guardrail_users import list_users
+            _json_response(self, 200, {"users": list_users()}, cors_headers)
+            return
+        if path == "/api/keys":
+            from guardrail_users import list_api_keys
+            _json_response(self, 200, {"keys": list_api_keys()}, cors_headers)
+            return
         # ── Auth endpoints (GET) ──────────────────────────────────
         if path == "/api/auth/session":
             session_token = self.headers.get("X-Session-Token", "") or \
                 self.headers.get("Cookie", "").replace("session=", "", 1)
             session = validate_session(session_token) if session_token else None
+            username = (session or {}).get("username")
+            from guardrail_users import get_user, user_2fa_state
+            user = get_user(username) if username else None
             _json_response(self, 200, {
                 "authenticated": session is not None,
                 "session": session,
-                "2fa_configured": is_2fa_configured(),
+                "username": username,
+                "role": (user or {}).get("role"),
+                "2fa_configured": bool(user and user.get("totp_enabled")) or is_2fa_configured(),
                 "2fa_verified": session_2fa_verified(session),
+                "2fa": user_2fa_state(username) if username else {"enabled": False},
             }, cors_headers)
             return
         if path == "/api/auth/2fa/status":
+            session_token = self.headers.get("X-Session-Token", "") or \
+                self.headers.get("Cookie", "").replace("session=", "", 1)
+            session = validate_session(session_token) if session_token else None
+            username = (session or {}).get("username", "admin")
+            from guardrail_users import user_2fa_state
+            st = user_2fa_state(username)
             _json_response(self, 200, {
-                "2fa_configured": is_2fa_configured(),
-                "2fa_enabled": has_2fa(),
+                "username": username,
+                **st,
+                "2fa_configured": st["enabled"],
+                "2fa_enabled": st["enabled"],
             }, cors_headers)
             return
         if path == "/api/auth/2fa/setup":
-            if not is_auth_configured():
-                _json_response(self, 503, {"error": "auth not configured"},
-                               cors_headers)
-                return
-            result = enable_2fa()
-            _json_response(self, 200, result, cors_headers)
+            # Enrolment is POST-only, requires security:manage, and is
+            # non-destructive. This GET used to regenerate the secret for
+            # anyone who could reach the port.
+            _json_response(self, 405, {
+                "error": "use POST /api/auth/2fa/setup",
+                "detail": "anonymous 2FA enrolment was removed in the security audit",
+            }, cors_headers)
             return
         if path == "/api/emergency/status":
             # Read emergency state file
@@ -449,6 +483,7 @@ class Handler(BaseHTTPRequestHandler):
         if not _require_json_content_type(self):
             return
         segments = [s for s in path.split("/") if s]
+        result_token = getattr(result, "session_token", None)
         if len(segments) == 3 and segments[1] == "policies":
             try:
                 body = json.loads(self._read_body() or b"{}")
@@ -485,10 +520,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def _do_delete_impl(self):  # noqa: N802
         path, _ = self._route()
-        result, cors_headers = self._auth_and_preflight(path_tier(path))
+        result, cors_headers = self._auth_and_preflight(path_tier(path, "DELETE"))
         if not result.ok:
             send_auth_error(self, result)
             return
+        session_token = getattr(result, "session_token", None)
         segments = [s for s in path.split("/") if s]
         if len(segments) == 3 and segments[1] == "policies":
             page_id = segments[2]
@@ -500,8 +536,51 @@ class Handler(BaseHTTPRequestHandler):
             engine._page_policies.pop(page_id, None)
             _json_response(self, 200, {"ok": True, "page": page_id,
                                        "removed": removed},
-                           cors_headers,
-                           session_token=result.session_token)
+                           cors_headers, session_token=session_token)
+            return
+        if len(segments) == 3 and segments[1] == "users":
+            from guardrail_users import set_disabled
+            out = set_disabled(segments[2], True)
+            _json_response(self, 200 if out.get("ok") else 400, out,
+                           cors_headers, session_token=session_token)
+            return
+        if len(segments) == 3 and segments[1] == "keys":
+            from guardrail_users import revoke_api_key
+            out = revoke_api_key(segments[2])
+            _json_response(self, 200 if out.get("ok") else 404, out,
+                           cors_headers, session_token=session_token)
+            return
+        _json_response(self, 404, {"error": "not found"}, cors_headers)
+
+    def do_PATCH(self):  # noqa: N802
+        path, _ = self._route()
+        result, cors_headers = self._auth_and_preflight(path_tier(path, "PATCH"))
+        if not result.ok:
+            send_auth_error(self, result)
+            return
+        segments = [s for s in path.split("/") if s]
+        if len(segments) == 3 and segments[1] == "users":
+            try:
+                body = json.loads(self._read_body() or b"{}")
+            except json.JSONDecodeError:
+                _json_response(self, 400, {"error": "invalid json"}, cors_headers)
+                return
+            from guardrail_users import set_role, set_disabled
+            name = segments[2]
+            out = {"ok": True, "username": name}
+            if "role" in body:
+                r = set_role(name, body["role"])
+                if not r.get("ok"):
+                    _json_response(self, 400, r, cors_headers)
+                    return
+                out["role"] = body["role"]
+            if "disabled" in body:
+                r = set_disabled(name, bool(body["disabled"]))
+                if not r.get("ok"):
+                    _json_response(self, 400, r, cors_headers)
+                    return
+                out["disabled"] = bool(body["disabled"])
+            _json_response(self, 200, out, cors_headers)
             return
         _json_response(self, 404, {"error": "not found"}, cors_headers)
 
@@ -540,13 +619,20 @@ class Handler(BaseHTTPRequestHandler):
             password = body.get("password", "")
             totp_code = body.get("totp_code", "")
             backup_code = body.get("backup_code", "")
-            if not has_password():
-                _json_response(self, 403, {
-                    "error": "no password configured. Set "
-                             "GUARDRAIL_ADMIN_PASSWORD env var."},
-                               cors_headers)
-                return
-            if verify_password(password):
+            from guardrail_users import (ensure_initialised, verify_credentials,
+                                          user_2fa_state)
+            ensure_initialised()
+            username = (body.get("username") or "admin").strip().lower()
+            user_rec = verify_credentials(username, password)
+            if user_rec is None and username == "admin" and verify_password(password):
+                # Legacy single-admin fallback, kept for backward compatibility
+                user_rec = {"username": "admin", "role": "admin",
+                            "totp_enabled": is_2fa_configured(),
+                            "totp_secret": None, "backup_codes": []}
+            if user_rec is not None:
+                role = user_rec.get("role", "viewer")
+                twofa_enabled = bool(user_rec.get("totp_enabled")) or (
+                    username == "admin" and is_2fa_configured())
                 # Clear login attempts on successful password
                 login_ident = f"login:{self.client_address[0] if self.client_address else 'unknown'}"
                 _clear_login_attempts(login_ident)
@@ -554,18 +640,19 @@ class Handler(BaseHTTPRequestHandler):
                 _log_auth_event("login_password_ok", self.client_address[0] if self.client_address else "unknown",
                                self.headers.get("User-Agent", ""))
                 # ── 2FA step ──
-                if is_2fa_configured():
+                if twofa_enabled:
                     # Issue a temporary 2fa-pending session token
                     tmp_token = create_session(
                         self.client_address[0] if self.client_address else "unknown",
-                        self.headers.get("User-Agent", ""))
+                        self.headers.get("User-Agent", ""), username, role)
                     # Mark session as 2fa-pending
                     sess = validate_session(tmp_token)
                     if sess:
                         sess["2fa_pending"] = True
                     # Verify TOTP or backup code if provided
-                    totp_ok = verify_2fa_code(totp_code) if totp_code else False
-                    backup_ok = verify_backup_code(backup_code) if backup_code else False
+                    totp_ok = verify_2fa_code(totp_code, username) if totp_code else False
+                    backup_ok = (verify_user_backup_code(username, backup_code)
+                                 or verify_backup_code(backup_code)) if backup_code else False
                     if totp_ok or backup_ok:
                         # 2FA satisfied — mark session fully authenticated
                         sess["2fa_verified"] = True
@@ -597,7 +684,7 @@ class Handler(BaseHTTPRequestHandler):
                                    self.headers.get("User-Agent", ""))
                     session_token = create_session(
                         self.client_address[0] if self.client_address else "unknown",
-                        self.headers.get("User-Agent", ""))
+                        self.headers.get("User-Agent", ""), username, role)
                     csrf = set_csrf_token(session_token)
                     _h = dict(cors_headers)
                     _h["X-CSRF-Token"] = csrf
@@ -645,8 +732,9 @@ class Handler(BaseHTTPRequestHandler):
                 _json_response(self, 400, {"error": "no 2FA-pending session"},
                                cors_headers)
                 return
-            totp_ok = verify_2fa_code(totp_code) if totp_code else False
-            backup_ok = verify_backup_code(backup_code) if backup_code else False
+            totp_ok = verify_2fa_code(totp_code, session.get("username")) if totp_code else False
+            backup_ok = ((verify_user_backup_code(session.get("username"), backup_code)
+                          or verify_backup_code(backup_code)) if backup_code else False)
             if totp_ok or backup_ok:
                 session["2fa_verified"] = True
                 session["2fa_pending"] = False
@@ -979,6 +1067,90 @@ class Handler(BaseHTTPRequestHandler):
             _json_response(self, 200, {"ok": True,
                                        "message": "password set successfully"},
                            cors_headers)
+            return
+
+        # ── 2FA enrolment (authenticated, non-destructive) ────────
+        if path == "/api/auth/2fa/setup":
+            try:
+                body = json.loads(self._read_body() or b"{}")
+            except json.JSONDecodeError:
+                body = {}
+            session_token = self.headers.get("X-Session-Token", "") or \
+                self.headers.get("Cookie", "").replace("session=", "", 1)
+            session = validate_session(session_token) if session_token else None
+            username = (session or {}).get("username", "admin")
+            from guardrail_users import get_user, user_2fa_state
+            user = get_user(username) or {}
+            already = bool(user.get("totp_enabled"))
+            replace = str(body.get("confirm", "")).lower() == "replace"
+            if already:
+                # Replacement requires a fresh proof of possession: the account
+                # password plus a current code (TOTP or backup code).
+                if not replace:
+                    _json_response(self, 409, {
+                        "error": "2FA is already configured for this account",
+                        "code": "already_configured",
+                        "how_to_replace": "POST again with {\"confirm\":\"replace\","
+                                          "\"password\":\"...\",\"code\":\"123456\"}",
+                    }, cors_headers)
+                    return
+                if not verify_password(body.get("password", "")):
+                    _json_response(self, 403, {"error": "password confirmation failed"},
+                                   cors_headers)
+                    return
+                code = body.get("code", "")
+                if not (verify_2fa_code(code, username)
+                        or verify_user_backup_code(username, code)):
+                    _json_response(self, 403, {"error": "current 2FA code required"},
+                                   cors_headers)
+                    return
+            result = enable_user_2fa(username, replace=replace)
+            _log_auth_event("2fa_enrolled", self.client_address[0] if self.client_address else "unknown",
+                            self.headers.get("User-Agent", ""), username)
+            _json_response(self, 200 if result.get("ok") else 400, result, cors_headers)
+            return
+
+        # ── User administration (POST) ────────────────────────────
+        if path == "/api/users":
+            try:
+                body = json.loads(self._read_body() or b"{}")
+            except json.JSONDecodeError:
+                _json_response(self, 400, {"error": "invalid json"}, cors_headers)
+                return
+            from guardrail_users import create_user
+            result = create_user(body.get("username", ""), body.get("password", ""),
+                                 body.get("role", "viewer"))
+            _json_response(self, 200 if result.get("ok") else 400, result, cors_headers)
+            return
+        if len([x for x in path.split("/") if x]) == 4 and path.startswith("/api/users/") \
+                and path.endswith("/password"):
+            uname = [x for x in path.split("/") if x][2]
+            try:
+                body = json.loads(self._read_body() or b"{}")
+            except json.JSONDecodeError:
+                _json_response(self, 400, {"error": "invalid json"}, cors_headers)
+                return
+            from guardrail_users import set_user_password
+            result = set_user_password(uname, body.get("password", ""))
+            _json_response(self, 200 if result.get("ok") else 400, result, cors_headers)
+            return
+
+        # ── API keys (POST) ───────────────────────────────────────
+        if path == "/api/keys":
+            try:
+                body = json.loads(self._read_body() or b"{}")
+            except json.JSONDecodeError:
+                _json_response(self, 400, {"error": "invalid json"}, cors_headers)
+                return
+            from guardrail_users import create_api_key
+            result = create_api_key(body.get("name", ""), body.get("role", "viewer"))
+            _json_response(self, 200 if result.get("ok") else 400, result, cors_headers)
+            return
+        if path.startswith("/api/keys/") and path.endswith("/rotate"):
+            kid = [x for x in path.split("/") if x][2]
+            from guardrail_users import rotate_api_key
+            result = rotate_api_key(kid)
+            _json_response(self, 200 if result.get("ok") else 404, result, cors_headers)
             return
 
         # ── Validate endpoints (ADMIN) ────────────────────────────

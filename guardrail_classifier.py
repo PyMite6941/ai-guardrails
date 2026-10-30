@@ -14,6 +14,7 @@
 
 import json
 import os
+import re
 import urllib.request
 import urllib.error
 from typing import Optional, Dict, Any, Tuple
@@ -44,9 +45,38 @@ class ClassifierConfig:
         self.api_key = data.get("api_key")
         self.timeout = int(data.get("timeout", 20))
         self.endpoint = data.get("endpoint", "chat")
+        # "auto" picks the wire format from the base URL: OpenAI-compatible
+        # hosts (Nebius Token Factory, NVIDIA NIM, any /v1 base) speak
+        # POST {base}/chat/completions; Ollama speaks POST {base}/api/chat.
+        self.api_style = str(data.get("api_style", "auto")).lower()
         # SSRF protection: block private/internal addresses
         from guardrail_auth import validate_model_url
         validate_model_url(self.base_url, "Classifier base URL")
+
+    def resolved_style(self) -> str:
+        if self.api_style in ("openai", "ollama"):
+            return self.api_style
+        base = self.base_url.lower()
+        if base.endswith("/v1") or "tokenfactory" in base or "api.nvidia.com" in base \
+                or "/openai" in base or "openrouter" in base or "groq" in base:
+            return "openai"
+        return "ollama"
+
+    def resolved_url(self) -> str:
+        style = self.resolved_style()
+        ep = (self.endpoint or "").strip("/")
+        if style == "openai":
+            if ep in ("", "chat", "v1/chat"):
+                ep = "chat/completions"
+            elif ep == "chat/completions":
+                pass
+            return f"{self.base_url}/{ep}"
+        # Ollama
+        if ep in ("", "chat", "api/chat"):
+            ep = "chat"
+        elif ep == "chat/completions":
+            ep = "chat"
+        return f"{self.base_url}/api/{ep}"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -54,7 +84,10 @@ class ClassifierConfig:
             "base_url": self.base_url,
             "model": self.model,
             "endpoint": self.endpoint,
+            "api_style": self.resolved_style(),
+            "url": self.resolved_url(),
             "timeout": self.timeout,
+            "api_key_set": bool(self.api_key),
         }
 
 
@@ -80,7 +113,7 @@ class GuardrailClassifier:
         prompt = CLASSIFIER_PROMPT_TEMPLATE.format(
             awareness=awareness_note, text=text[:2000])
         payload = self._build_payload(prompt)
-        url = f"{self.config.base_url}/api/{self.config.endpoint}"
+        url = self.config.resolved_url()
 
         try:
             req = urllib.request.Request(
@@ -95,10 +128,20 @@ class GuardrailClassifier:
             )
             with urllib.request.urlopen(req, timeout=self.config.timeout) as resp:
                 body = resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as e:
+            self.stats["errors"] += 1
+            detail = ""
+            try:
+                detail = e.read().decode("utf-8", errors="replace")[:200]
+            except Exception:
+                pass
+            return {"safe": True,
+                    "reason": f"classifier HTTP {e.code} at {url} (fail open): {detail}",
+                    "model": self.config.model, "raw": "", "url": url}
         except Exception as e:
             self.stats["errors"] += 1
-            return {"safe": True, "reason": f"classifier unreachable (fail open): {e}",
-                    "model": self.config.model, "raw": ""}
+            return {"safe": True, "reason": f"classifier unreachable (fail open): {e} at {url}",
+                    "model": self.config.model, "raw": "", "url": url}
 
         try:
             data = json.loads(body)
@@ -110,16 +153,22 @@ class GuardrailClassifier:
         if not safe:
             self.stats["blocks"] += 1
         return {"safe": safe, "reason": reason,
-                "model": self.config.model, "raw": text_out}
+                "model": self.config.model, "raw": text_out, "url": url}
 
     def _build_payload(self, prompt: str) -> Dict[str, Any]:
-        if self.config.endpoint == "chat":
-            return {
+        style = self.config.resolved_style()
+        if style == "openai" or self.config.endpoint == "chat":
+            payload: Dict[str, Any] = {
                 "model": self.config.model,
                 "messages": [{"role": "system", "content": CLASSIFIER_SYSTEM},
                              {"role": "user", "content": prompt}],
                 "stream": False,
             }
+            if style == "openai":
+                # Deterministic verdicts matter more than creativity here.
+                payload["temperature"] = 0
+                payload["max_tokens"] = 80
+            return payload
         return {"model": self.config.model, "prompt": prompt, "stream": False}
 
     @staticmethod
@@ -140,17 +189,38 @@ class GuardrailClassifier:
 
     @staticmethod
     def _parse_verdict(text: str) -> Tuple[bool, str]:
+        """Read the model's one-line verdict.
+
+        The previous version used `"safe" in low`, so a model answering
+        "NOT SAFE" was scored as safe — the exact failure mode this layer
+        exists to prevent. Negations are checked before the positive word.
+        """
         t = (text or "").strip()
-        low = t.lower()
-        if low.startswith("block") or "block:" in low:
+        if not t:
+            return False, "classifier returned an empty verdict"
+        first = next((ln.strip() for ln in t.splitlines() if ln.strip()), t)
+        # strip markdown emphasis / bullets / quoting
+        norm = re.sub(r"^[\s#>*`_\"'-]+", "", first).strip()
+        low = norm.lower()
+
+        # 1. explicit negation wins over any positive word
+        if re.search(r"\b(not|isn't|is\s+not|never)\s+(safe|allowed)\b", low) or "unsafe" in low:
+            return False, "classifier says not safe"
+
+        # 2. a leading verdict word is the model's actual answer
+        if re.match(r"^(verdict\s*[:\-]\s*)?(block|deny|denied)\b", low):
             idx = low.find("block:")
-            reason = t[idx + 6:].strip() if idx >= 0 else t
+            reason = norm[idx + 6:].strip(" :") if idx >= 0 else ""
             return False, reason or "classifier blocked content"
-        if low.startswith("safe") or "safe" in low:
+        if re.match(r"^(verdict\s*[:\-]\s*)?(safe|allow|allowed|pass|ok)\b", low):
             return True, "classifier approved content"
-        # Unclear -> fail closed (block) so a sloppy classifier doesn't let
-        # something through unexamined.
-        return False, f"classifier returned unclear verdict: {t[:120]}"
+
+        # 3. no leading verdict: any block signal outweighs a stray "safe"
+        if "block" in low or "deny" in low or "denied" in low:
+            return False, "classifier blocked content"
+
+        # 4. anything else is unclear -> fail closed
+        return False, f"classifier returned unclear verdict: {norm[:120]}"
 
     def get_stats(self) -> Dict[str, Any]:
         return dict(self.stats)
