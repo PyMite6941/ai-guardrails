@@ -10,7 +10,17 @@
     "start": "tmux/guardrail-tmux.sh start",
     "publish": "npm publish --access public"
   },
-  "keywords": ["guardrails", "llm", "ai", "input-validation", "output-validation", "clyde", "prompt-injection", "pii", "web-page"],
+  "keywords": [
+    "guardrails",
+    "llm",
+    "ai",
+    "input-validation",
+    "output-validation",
+    "clyde",
+    "prompt-injection",
+    "pii",
+    "web-page"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -54,7 +64,14 @@
     "scripts/cron/",
     "policies/",
     "docker/",
-    "tmux/"
+    "tmux/",
+    "guardrail_normalize.py",
+    "guardrail_net.py",
+    "tests/test_detection.py",
+    "benchmarks/",
+    "SECURITY.md"
   ],
-  "engines": { "node": ">=18" }
+  "engines": {
+    "node": ">=18"
+  }
 }

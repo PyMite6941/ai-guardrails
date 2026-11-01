@@ -492,10 +492,11 @@ Standalone (no server) client-side rules are included.
 
 ## Tests
 
-Eleven suites, all stdlib, all runnable at once:
+Twelve suites, all stdlib, each in its own process:
 
 ```
-for t in tests/*.py; do python3 "$t" || echo "FAILED $t"; done
+python3 tests/run_all.py              # all suites
+python3 tests/run_all.py detection    # just one
 ```
 
 | suite | covers |
@@ -511,6 +512,47 @@ for t in tests/*.py; do python3 "$t" || echo "FAILED $t"; done
 | `test_auth.py` | auth, rate limiting, host validation, CSRF |
 | `test_security.py` | default-deny, per-user 2FA, backup-code hashing, roles, API keys |
 | `test_classifier_e2e.py` | the model layer actually runs on `/api/validate`: mock endpoint in place of Nebius, escalate-only behaviour, bearer key delivery, counter accuracy |
+| `test_detection.py` | evasion resistance (homoglyph, zero-width, tag/emoji smuggling, leet, spacing, encodings, templates, 2 non-Latin scripts), false-positive traps, ReDoS time budget, fail-closed wiring |
+
+## Detection benchmark
+
+`benchmarks/run_benchmark.py` measures detection and false-positive rates
+instead of asserting them. It takes the seed attacks in
+`benchmarks/corpus/attacks.jsonl` (instruction override, prompt extraction,
+jailbreak personas, chat-template injection, indirect injection,
+exfiltration, tool abuse; 10 languages), rewrites each with 16 published
+evasion techniques (`benchmarks/mutators.py`), and scores them alongside the
+benign corpus, which deliberately includes trap prompts ("abundant",
+"secret santa", "enable developer mode on Android").
+
+```
+python3 benchmarks/run_benchmark.py                # gate against thresholds.json
+python3 benchmarks/run_benchmark.py --seeds 20     # fuzz with more seeds
+python3 benchmarks/run_benchmark.py --show-misses  # list what got through
+```
+
+| detector | detection | false positives |
+|---|---|---|
+| prompt-injection layer, before this release | 30.5% | 22.9% |
+| prompt-injection layer, now | 97.6% | 0.0% |
+| full input pipeline (default policy) | 98.2% | 18.1% (generic default keywords: see thresholds note) |
+
+CI fails if any number drops below `benchmarks/thresholds.json`. The thresholds
+only move up.
+
+## Continuous security (GitHub Actions)
+
+| workflow | what it does |
+|---|---|
+| `ci.yml` | test suites on Python 3.9–3.13, Node package test, Docker build + non-root import/health smoke test, flake8, gated detection benchmark |
+| `security.yml` | CodeQL (Python, JS, Actions; `security-extended`), Bandit SAST to code scanning + gate, TruffleHog secret scan of full history, dependency review on PRs |
+| `scorecard.yml` | OpenSSF Scorecard supply-chain checks |
+| `research.yml` | weekly: fuzz the detectors with new random seeds (opens a `detection-regression` issue on a miss), and an arXiv digest of new prompt-injection / jailbreak / guardrail-evasion papers as a `research` triage issue |
+| `publish.yml` | npm publish only after all suites and the benchmark pass, with signed provenance |
+
+All third-party actions are pinned to full commit SHAs, default token
+permissions are read-only, and Dependabot keeps actions, npm, pip, Docker
+and bundler dependencies current.
 
 `python3 guardrail_testing.py` runs the adversarial suite (catch rate + false-positive rate).
 

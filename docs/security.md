@@ -8,6 +8,38 @@ permalink: /security.html
 
 AI Guardrails is built with defense-in-depth. Every layer is independent — if one fails, the others still protect you.
 
+## Detection hardening
+
+Text detectors are attacked through the *text*: Hackett et al. (2025,
+[arXiv:2504.11168](https://arxiv.org/abs/2504.11168)) fully evaded six
+commercial prompt-injection detectors with character injection alone, and
+showed NFKC normalization does not help. `guardrail_normalize.py` therefore
+builds several views of every input and every detector scans all of them:
+
+| view | defeats |
+|---|---|
+| invisible characters removed (category Cf/Co/Cn, variation selectors, Hangul fillers; emoji ZWJ sequences kept) | zero-width insertion, bidi controls, soft hyphens |
+| homoglyph + diacritic + fullwidth folding | Cyrillic/Greek look-alikes, Zalgo/accents, fullwidth and math letters |
+| leetspeak folding | `1gn0r3 pr3v10u5` |
+| separator-free ("squashed") | `i g n o r e`, `i.g.n.o.r.e` |
+| decoded smuggling | payloads hidden in Unicode tag characters or emoji variation selectors are **decoded and scanned**, and blocked at the canonicalize step |
+| decoded encodings | Base64 (nested), hex, percent-encoding, ROT13, reversed text |
+
+Rules (`guardrail_prompt_injection.py`) are grouped by OWASP LLM01/LLM07
+category, use word boundaries and bounded gaps instead of substrings, and are
+linear-time (a ReDoS budget is enforced in `tests/test_detection.py`). The
+engine fails closed if a detector cannot load, runs the length check before
+the scanners (LLM10, unbounded consumption), and matches operator policy
+phrases with the same folding and with word boundaries.
+
+Outbound model calls go through `guardrail_net.urlopen_http`, which only
+speaks HTTP(S), also across redirects, so a tampered endpoint URL cannot read
+`file://` paths.
+
+Deterministic rules are one layer. Keep the model classifier, the outer
+monitor, and least-privilege tools enabled. No text filter alone stops an
+adaptive attacker.
+
 ## Authentication & authorization
 
 | Mechanism | What it protects | Configuration |
