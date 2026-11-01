@@ -334,6 +334,8 @@ def test_model_connection(
     }
 
     import urllib.request
+
+    from guardrail_net import urlopen_http
     import urllib.error
 
     url = base_url.rstrip("/")
@@ -356,7 +358,7 @@ def test_model_connection(
     for test_url in test_urls:
         try:
             req = urllib.request.Request(test_url, headers=headers, method="GET")
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with urlopen_http(req, timeout=timeout) as resp:
                 result["valid"] = True
                 result["status_code"] = resp.status
                 result["reason"] = f"server responded with HTTP {resp.status}"

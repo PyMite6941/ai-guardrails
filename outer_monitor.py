@@ -31,6 +31,7 @@ import os
 import json
 import uuid
 import urllib.request
+from guardrail_net import urlopen_http  # noqa: E402
 import urllib.error
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
@@ -751,7 +752,7 @@ class OuterMonitor:
                 },
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=self.outside_model.timeout) as resp:
+            with urlopen_http(req, timeout=self.outside_model.timeout) as resp:
                 body = resp.read().decode("utf-8", errors="replace")
         except Exception as e:
             _append_jsonl(AUDIT_LOG, {
@@ -880,7 +881,7 @@ class OuterMonitor:
                 },
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=self.trusted_model.timeout) as resp:
+            with urlopen_http(req, timeout=self.trusted_model.timeout) as resp:
                 body = resp.read().decode("utf-8", errors="replace")
         except Exception as e:
             _append_jsonl(TRUSTED_AUDIT_LOG, {

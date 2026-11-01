@@ -19,6 +19,7 @@ import json
 import os
 import sys
 import urllib.request
+from guardrail_net import urlopen_http  # noqa: E402
 import urllib.error
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Callable
@@ -138,7 +139,7 @@ class HumanLoopEscalator:
                 },
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=self.config.timeout) as resp:
+            with urlopen_http(req, timeout=self.config.timeout) as resp:
                 body = resp.read().decode("utf-8", errors="replace")
             record["webhook_response"] = body[:500]
         except Exception as e:

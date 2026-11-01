@@ -108,7 +108,7 @@ def cmd_start(args):
     import urllib.request
     for i in range(30):
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=2)
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=2)  # nosec B310 - fixed loopback http URL
             ok(f"Server started (pid {proc.pid})")
             info(f"  Web UI:    http://{host}:{port}/")
             info(f"  API:       http://{host}:{port}/api/*")
@@ -183,7 +183,7 @@ def cmd_health(args):
     import urllib.request
     port = args.get("--port", "8083")
     try:
-        resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=5)
+        resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=5)  # nosec B310 - fixed loopback http URL
         data = json.loads(resp.read())
         print(json.dumps(data, indent=2))
     except Exception as e:

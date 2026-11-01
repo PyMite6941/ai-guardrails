@@ -603,7 +603,7 @@ def agentic_plan_and_act(user_text: str, session: ChatSession,
 
     # Step 2.5: Thought-process validation — validate the agent's reasoning
     # before acting. This is fast (deterministic regex, no LLM call).
-    thought_text = f"Agent {agent_name} plans to use tool '{tool_name}' with args {json.dumps(tool_args)} for user request: {user_text[:200]}"
+    thought_text = f"Agent 'agent' plans to use tool '{tool_name}' with args {json.dumps(tool_args)} for user request: {user_text[:200]}"
     thought_validation = monitor.validate_thought(
         agent_name="agent", thought=thought_text, page_id="chat-agent-thought"
     )
