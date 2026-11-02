@@ -105,6 +105,23 @@ def filler_words(text: str, rng: random.Random) -> str:
     return " ".join(out)
 
 
+# Words NOT in guardrail_normalize.FILLER_WORDS: nouns, verbs and nonsense.
+# A detector cannot have been tuned to drop these, so this measures how well
+# rules tolerate arbitrary insertions (the honest generalisation number).
+NOVEL_FILLER = ["banana", "xylo", "teapot", "quantum", "seventeen", "blue", "walrus",
+                "indeed", "meanwhile", "zx"]
+
+
+def filler_novel(text: str, rng: random.Random) -> str:
+    words = text.split()
+    out = []
+    for w in words:
+        out.append(w)
+        if rng.random() < 0.25:
+            out.append(rng.choice(NOVEL_FILLER))
+    return " ".join(out)
+
+
 def stacked(text: str, rng: random.Random) -> str:
     """Two techniques at once: the realistic adaptive attacker."""
     first, second = rng.sample([homoglyph, zero_width, leetspeak, random_case, diacritics], 2)
@@ -128,6 +145,7 @@ MUTATORS: Dict[str, Callable[[str, random.Random], str]] = {
     "rot13": rot13,
     "reversed": reversed_text,
     "filler_words": filler_words,
+    "filler_novel": filler_novel,
     "stacked": stacked,
 }
 

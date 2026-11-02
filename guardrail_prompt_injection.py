@@ -38,8 +38,9 @@ import re
 import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
 
-from guardrail_normalize import (canonicalize, decode_smuggled, fold, fold_lines, leet,
-                                 native_lower, squash, strip_invisible)
+from guardrail_normalize import (canonicalize, decode_smuggled, despace, drop_filler,
+                                 drop_foreign_words, fold,
+                                 fold_lines, leet, native_lower, squash, strip_invisible)
 
 # Kept for backwards compatibility with earlier imports.
 from guardrail_normalize import strip_invisible as strip_unicode_smuggling  # noqa: F401
@@ -66,7 +67,7 @@ _SENSITIVE = (r"(?:secrets?|passwords?|credentials?|tokens?|keys?|api\W?keys?|co
               r"session|data|conversation|chat|history|messages|context|prompt|instructions|"
               r"files?|contents?|emails?|personal|private|user'?s?|everything|it|them|this)")
 _BAD_PERSONA = (r"(?:unrestricted|unfiltered|uncensored|jailbroken|jail\W?broken|amoral|"
-                r"unethical|unaligned|unbound|unchained|liberated|evil|rogue|lawless)")
+                r"unethical|unaligned|unbound|unchained|liberated|evil|rogue|lawless|unhinged)")
 _NO_LIMITS = (r"(?:no|without|zero|free\W+(?:of|from)|ignoring)\s+(?:any\s+)?(?:ethical\s+|"
               r"moral\s+|safety\s+|content\s+)?(?:restrictions|filters|filtering|guidelines|"
               r"limitations|limits|censorship|guardrails|rules|boundaries|ethics|morals)")
@@ -147,7 +148,9 @@ RULES: List[Tuple[str, str, str, str, str, int]] = [
      r"pretend)\b(?:\W+\w+){0,3}?\W+(?:in\s+|with\s+)?developer\s+mode\b", 0),
     ("jailbreak.bad_persona", "jailbreak", "critical", "text",
      r"\b(?:you(?:'re|\s+are|\s+will\s+be|\s+become)|act\s+as|pretend\s+to\s+be|roleplay\s+as|"
-     r"play\s+the\s+role\s+of|simulate|become)\s+(?:now\s+)?(?:an?\s+)?(?:\w+\s+)?"
+     r"play\s+the\s+role\s+of|simulate|become|in\s+the\s+role\s+of|reply\s+only\s+as|"
+     r"respond\s+only\s+as)\s+(?:now\s+)?(?:in\s+the\s+role\s+of\s+)?(?:an?\s+|my\s+|the\s+)?"
+     r"(?:\w+\s+){0,2}"
      + _BAD_PERSONA + r"\b", 0),
     ("jailbreak.no_limits", "jailbreak", "high", "text",
      r"\b(?:respond|answer|reply|act|operate|behave|speak|write|talk|you\s+have|you(?:'re|"
@@ -195,8 +198,12 @@ RULES: List[Tuple[str, str, str, str, str, int]] = [
      r"(?:previas|anteriores|precedenti)|ignorier\w{0,3}(?:alle)?(?:vorherigen|bisherigen)"
      r"(?:anweisungen|regeln)", 0),
     ("template.squashed", "template_injection", "critical", "squashed",
-     r"imstart(?:system|user|assistant)|imend|startheaderid|endheaderid|eotid|beginoftext|"
+     r"imstart(?:system|user|assistant)|startheaderid|endheaderid|beginoftext|"
      r"inst(?:sys)+|sysinst", 0),
+    # Short tokens occur inside ordinary squashed text ("...to english by" ->
+    # "eotid"), so alone they are only a weak signal.
+    ("template.squashed_short", "template_injection", "medium", "squashed",
+     r"imend|eotid", 0),
     ("indirect.squashed", "indirect_injection", "high", "squashed",
      r"ifyouarean?(?:ai|llm|languagemodel|aiassistant|assistant|aiagent)|"
      r"(?:note|message|instructions?|attention)(?:to|for)(?:the|any|all)?(?:ai|assistant|"
@@ -278,6 +285,90 @@ RULES: List[Tuple[str, str, str, str, str, int]] = [
      r"\brm\s+-[a-z]*r[a-z]*f?[a-z]*\s+(?:--no-preserve-root\s+)?/(?:\s|$|\*)|"
      r"\bmkfs(?:\.\w+)?\s+/dev/|\bdd\s+if=\S+\s+of=/dev/[sh]d|:\(\)\s*\{\s*:\|:&\s*\};:",
      re.IGNORECASE),
+    # ── Generalisation rules (from external train-split misses, by class) ──
+    # Context reset: "forget everything before that", "ignore above and ...",
+    # "forget all previous tasks / preceding orders / the previous information".
+    ("override.context_reset", "instruction_override", "critical", "text",
+     r"\b(?:forget|ignore|disregard|erase|delete|remove|leave)\b(?:\W+about)?\W+(?:"
+     r"everything\W+(?:before|above|prior|previous|earlier|up\W+to\W+now|to\W+your\W+core|"
+     r"from\W+(?:before|chat\W?gpt|openai))"
+     r"|(?:all\W+)?(?:of\W+)?(?:the\W+|your\W+|my\W+)?(?:above|preceding|previous|prior|earlier)"
+     r"(?:\W+\w+)?\W+(?:tasks?|assignments?|information|orders|commands|inputs?|context|"
+     r"conversation|text|prompts?|statements?|content)"
+     r"|(?:the\W+)?above\W+(?:and|then)\b)", 0),
+    ("override.context_reset_bracket", "instruction_override", "critical", "lines",
+     r"[\[(<{]\s*(?:ignore|disregard|forget)\s+(?:all\s+)?(?:prior|previous|above)\s+"
+     r"(?:inputs?|instructions?|text|context)\s*[\])>}]", re.I),
+    ("override.multilingual_de_reset", "instruction_override", "critical", "text",
+     r"\b(?:vergiss|vergessen\s+sie|ignorier(?:e|en)?|missachte)\b(?:\W+\w+){0,2}?\W+(?:"
+     r"alles\W+(?:davor|zuvor|vorher|bisherige|bis\W+jetzt|was\W+(?:ich|wir|du))"
+     r"|(?:alle\W+)?(?:vorherigen|vorangehenden|vorangegangenen|bisherigen|obigen|vorigen)\W+"
+     r"(?:aufgaben|auftrage|angaben|informationen|befehle|anweisungen|instruktionen|eingaben))"
+     r"|\b(?:die\W+)?obigen\W+(?:ausfuhrungen|anweisungen|angaben)\W+ignorieren\b", 0),
+    ("override.new_task_follows", "instruction_override", "medium", "text",
+     r"\b(?:now|nun|jetzt)\W+(?:there\W+are\W+)?(?:new|further|more|a\W+few\W+more|neue|weitere)"
+     r"\W+(?:tasks?|instructions|aufgaben|anweisungen)\W+(?:follow|are\W+followed|folgen)"
+     r"|\b(?:focus|concentrate|konzentriere\W+dich)\W+(?:now\W+|jetzt\W+|nun\W+)?(?:on|auf)\W+"
+     r"(?:your|deine)\W+(?:new|neue)\W+(?:task|aufgabe)"
+     r"|\bstart\W+(?:over|again)\W+with\W+a\W+new\W+task\b"
+     r"|\bforget\W+(?:about\W+)?(?:all\W+)?(?:the\W+)?(?:tasks|assignments)\b"
+     r"|\bvergiss\W+alle\W+(?:aufgaben|auftrage)\b|\bvergiss\W+alles\b|\bforget\W+everything\b",
+     0),
+    # Persona defined with bad traits: "ucar is an unfiltered and amoral chatbot".
+    ("jailbreak.persona_traits", "jailbreak", "critical", "text",
+     r"\b" + _BAD_PERSONA + r"\b(?:\W+(?:and|or|\w+))?(?:\W+\w+){0,2}?\W+(?:" + _AI
+     + r"|character|persona|entity|being|version|alter\W+ego|response|responses|answers?)\b"
+     r"|\b(?:characteristics|traits|personality)\b\W+(?:\w+\W+){0,4}?" + _BAD_PERSONA + r"\b",
+     0),
+    # Claimed freedom from rules: "not bound by any of ChatGPT's ethical guidelines".
+    ("jailbreak.unbound", "jailbreak", "critical", "text",
+     r"\b(?:not|never|no\W+longer)\W+(?:be\W+)?(?:bound|restricted|limited|constrained|"
+     r"governed|held\W+back)\W+by\W+(?:any\W+)?(?:of\W+)?(?:the\W+|its\W+|your\W+|"
+     r"(?:chat\W?gpt|openai|anthropic|the\W+ai)'?s?\W+)?(?:\w+\W+){0,2}?(?:rules|guidelines|"
+     r"polic(?:y|ies)|ethics|morals|restrictions|limitations|filters|laws|tos|terms)"
+     r"|\bfree(?:d|s)?\W+(?:itself|yourself|himself|herself|themselves\W+)?\W*(?:of|from)\W+"
+     r"(?:all|any|your|its)\W+(?:\w+\W+)?(?:limitations|restrictions|rules|constraints|filters|"
+     r"censorship|guidelines|boundaries|shackles|confines|chains|programming)"
+     r"|\b(?:does\W?n[o']?t|doesnt|do\W?n[o']?t|dont|will\W+not|won'?t|never)\W+(?:give\W+a\W+"
+     r"\w+|care|adhere|abide|follow|have)\W+(?:\w+\W+){0,2}?(?:ethic\w*|moral\w*|legal\w*|"
+     r"guidelines|rules|polic(?:y|ies)|restrictions|filters|limits)\b"
+     r"|\bno\W+(?:comprehension|concept|sense)\W+of\W+(?:morals|morality|ethics|legality)"
+     r"|\bbreak(?:ing)?\W+all\W+(?:of\W+)?(?:the\W+)?(?:rules|guidelines|restrictions)\b"
+     r"|\b(?:forget|ignore|disregard)\W+(?:\w+\W+){0,2}?(?:openai|chat\W?gpt|discord|anthropic)"
+     r"'?s?\W+(?:\w+\W+){0,2}?(?:tos|terms|polic(?:y|ies)|guidelines|rules)\b", 0),
+    ("jailbreak.moralizing_rant", "jailbreak", "critical", "text",
+     r"\bmoraliz\w*\W+rant\b(?:\W+\w+){0,6}?\W+(?:content\W+)?polic", 0),
+    # Dual-response format (DAN family): "answer in two ways ... the second as X".
+    ("jailbreak.dual_response", "jailbreak", "medium", "text",
+     r"\b(?:respond|answer|reply|response|responses)\b(?:\W+\w+){0,6}?\W+(?:in\W+)?(?:two|2|both)"
+     r"\W+(?:different\W+)?(?:ways|responses|answers|paragraphs|manners|personas)\b"
+     r"|\b(?:respond|reply|answer)\W+to\W+(?:all|every)\W+(?:\w+\W+)?(?:prompts?|questions?)"
+     r"\W+twice\b|\b(?:generate|give|provide)\W+(?:two|2)\W+responses\b", 0),
+    # Persona switch / role-play framing. Benign alone (creative role-play is
+    # normal), so medium: blocks only with another signal.
+    ("jailbreak.persona_switch", "jailbreak", "medium", "text",
+     r"\b(?:from\W+(?:now|this\W+(?:moment|point))(?:\W+on(?:ward)?s?)?|starting\W+now)\W+"
+     r"(?:\w+\W+){0,3}?you\W+(?:are|will|shall|must|go\W+by)"
+     r"|\byour\W+name\W+is\W+now\b|\byou\W+(?:now\W+)?go\W+by\W+the\W+name\b"
+     r"|\b(?:stay|remain)\W+in\W+character\b|\b(?:never|don'?t|do\W+not)\W+break\W+character\b"
+     r"|\b(?:respond|answer|reply)\W+to\W+(?:all|every)\W+(?:of\W+)?(?:my\W+)?(?:\w+\W+)?"
+     r"(?:questions?|prompts?|messages?)\W+as\b"
+     r"|\bstart\W+(?:all\W+)?(?:of\W+)?your\W+(?:responses|answers|replies)\W+with\b"
+     r"|\b(?:simulate|stay\W+in|remain\W+in|enter|you\W+are\W+(?:now\W+)?in)\W+(?:\w+\W+)?mode\b"
+     r"|\b(?:chat\W?gpt|gpt|assistant|ai)\W+(?:\w+\W+){0,2}?(?:you\W+are|your\W+name\W+is)\W+"
+     r"(?:now|going\W+to\W+(?:be|become|act|pretend))\b"
+     r"|\bpretend\W+to\W+be\W+(?:a\W+|an\W+)?(?:\w+\W+){0,2}?(?:character|ai|chatbot)\b", 0),
+    ("jailbreak.vendor_policy", "jailbreak", "medium", "text",
+     r"\b(?:openai|anthropic|chat\W?gpt|claude|gemini)'?s?\W+(?:\w+\W+)?(?:content\W+)?"
+     r"(?:polic(?:y|ies)|guidelines|tos|terms\W+of\W+service|filters|restrictions)\b", 0),
+    ("jailbreak.named_persona", "jailbreak", "medium", "text",
+     r"\byou\W+(?:are|will\W+be|will\W+become|are\W+going\W+to\W+(?:be|become|pretend\W+to\W+be))"
+     r"\W+(?:now\W+)?(?:called\W+|named\W+)?[a-z]+(?:gpt|ai|bot)\b(?<!\bchatgpt)", 0),
+    ("jailbreak.answer_anything", "jailbreak", "high", "text",
+     r"\b(?:will|must|always|can)\W+(?:actually\W+)?(?:answer|respond\W+to|fulfil+|comply\W+with)"
+     r"\W+(?:any|every|all)\W+(?:\w+\W+)?(?:requests?|questions?|prompts?)\b(?:\W+\w+){0,3}?\W+"
+     r"(?:no\W+matter|regardless|without\W+(?:question|hesitation|refusal|exception|warning|"
+     r"censorship|restriction))", 0),
 ]
 
 # ── System prompt disclosure markers (model output side) ─────────────────
@@ -308,6 +399,12 @@ SECRET_PATTERNS = [
     r"\bssh-(?:rsa|ed25519|dss)\s+[a-z0-9+/]{40,}={0,2}",
     r"-----begin\s+[a-z ]*private\s+key-----",
 ]
+
+# Risk scoring. critical/high findings block on their own; medium findings are
+# weak signals (role-play framing, "forget everything") that are common in
+# benign text and only block when two of them, or one plus anything else, fire.
+SEVERITY_WEIGHT = {"critical": 1.0, "high": 1.0, "medium": 0.5, "low": 0.25}
+BLOCK_SCORE = 1.0
 
 _COMPILED_RULES = [
     (rid, cat, sev, kind, re.compile(pat, flags))
@@ -430,7 +527,14 @@ class PromptInjectionDetector:
             sources.append(smuggled)
         for src in list(sources):
             sources.extend(decoded_layers(strip_invisible(src))[:_MAX_LAYERS])
-        sources = list(dict.fromkeys(sources))
+        # Structural de-obfuscation: rejoin spaced-out letters, drop filler
+        # words. Extra sources only; the originals are always scanned too.
+        for src in list(sources):
+            visible = strip_invisible(src)
+            despaced = despace(visible)
+            sources += [despaced, drop_filler(visible), drop_filler(despaced),
+                        drop_foreign_words(visible)]
+        sources = list(dict.fromkeys(s for s in sources if s))
 
         views: Dict[str, List[str]] = {"text": [], "native": [], "lines": [base], "squashed": []}
         for src in sources:
@@ -470,7 +574,9 @@ class PromptInjectionDetector:
                     findings.append({"rule": "secret.pattern", "category": "secret",
                                      "severity": "high", "match": pat})
                     break
-        return {"safe": not findings, "findings": findings}
+        findings.sort(key=lambda f: -SEVERITY_WEIGHT.get(f["severity"], 1.0))
+        score = sum(SEVERITY_WEIGHT.get(f["severity"], 1.0) for f in findings)
+        return {"safe": score < BLOCK_SCORE, "score": round(score, 2), "findings": findings}
 
     def scan(self, text: str) -> Tuple[bool, str, Optional[str]]:
         """Return (safe, reason, matched_rule_or_None). Fails closed."""

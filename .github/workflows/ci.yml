@@ -123,6 +123,16 @@ jobs:
         run: |
           set -o pipefail
           python benchmarks/run_benchmark.py --seeds 3 --json benchmark.json | tee benchmark.txt
+      # Independent, externally labelled datasets (test splits = holdout).
+      # Cached so PR runs do not refetch; floors in thresholds.json "external".
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: benchmarks/external
+          key: external-eval-${{ hashFiles('benchmarks/external_eval.py') }}
+      - name: Holdout evaluation on external datasets (gated)
+        run: |
+          set -o pipefail
+          python benchmarks/external_eval.py --gate --json external.json | tee external.txt
       - name: Job summary
         if: always()
         run: |
@@ -131,10 +141,16 @@ jobs:
             echo '```'
             grep -vE '^\s+MISS' benchmark.txt || true
             echo '```'
+            echo '## Holdout: external datasets (test splits)'
+            echo '```'
+            cat external.txt 2>/dev/null || echo "not run"
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: benchmark-report
-          path: benchmark.json
+          path: |
+            benchmark.json
+            external.json
           retention-days: 30

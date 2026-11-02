@@ -49,3 +49,4 @@ dist/
 
 # Install scripts (local-only, not committed)
 install_1password_cli.sh
+benchmarks/external/

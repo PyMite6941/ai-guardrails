@@ -535,8 +535,43 @@ python3 benchmarks/run_benchmark.py --show-misses  # list what got through
 | detector | detection | false positives |
 |---|---|---|
 | prompt-injection layer, before this release | 30.5% | 22.9% |
-| prompt-injection layer, now | 97.6% | 0.0% |
+| prompt-injection layer, now | 98.9% | 0.0% |
 | full input pipeline (default policy) | 98.2% | 18.1% (generic default keywords: see thresholds note) |
+
+Evasions now covered include spaced-out letters (`b-a-s-h`, 94%), filler words
+between trigger words, and Latin words inserted into non-Latin text. The
+`filler_novel` mutator inserts words the detector has never seen (88%); that
+is the honest number for arbitrary insertion.
+
+### Holdout: independently labelled datasets
+
+The corpus above was written alongside the rules, so it flatters them.
+`benchmarks/external_eval.py` scores the detector on public datasets labelled
+by other people. Misses are studied on the **train** splits only; the
+**test** splits are never read row by row and are the numbers that count.
+
+```
+python3 benchmarks/external_eval.py                          # holdout numbers
+python3 benchmarks/external_eval.py --split train --show-misses 20
+```
+
+| dataset (test split) | attacks caught | false positives |
+|---|---|---|
+| [jackhhao/jailbreak-classification](https://huggingface.co/datasets/jackhhao/jailbreak-classification), before | 54.0% | 0.8% |
+| jackhhao/jailbreak-classification, now | 76.3% | 0.8% |
+| [deepset/prompt-injections](https://huggingface.co/datasets/deepset/prompt-injections), before | 3.3% | 0.0% |
+| deepset/prompt-injections, now | 15.0% | 0.0% |
+| [databricks-dolly-15k](https://huggingface.co/datasets/databricks/databricks-dolly-15k) (1,000 benign instructions) | n/a | 0.0% |
+
+Read the deepset number with its labels in mind: it counts topic hijacking of
+a news bot ("You are Volkswagen. What do you think of Mercedes?") and plain
+role-play as injection. A context-free text detector cannot and should not
+block those for every application. Pair this layer with the model classifier
+(`guardrail_classifier.py`) and per-page policies for that class.
+
+Scoring: critical/high findings block alone; medium findings (role-play
+framing, "forget everything", a vendor's content policy named) are weak
+signals that block only in combination, so ordinary role-play requests pass.
 
 CI fails if any number drops below `benchmarks/thresholds.json`. The thresholds
 only move up.

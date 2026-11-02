@@ -26,6 +26,8 @@
 # Everything here is stdlib-only, linear time, and bounded in size.
 #=============================================================================
 
+import re
+from functools import lru_cache
 import unicodedata
 from typing import Dict, List
 
@@ -70,6 +72,12 @@ def _is_invisible(cp: int) -> bool:
     return cat in ("Cf", "Co", "Cs", "Cn")
 
 
+@lru_cache(maxsize=8192)
+def _invisible_char(ch: str) -> bool:
+    cp = ord(ch)
+    return cp == ZWJ or cp in (0xFE0E, 0xFE0F) or _is_invisible(cp)
+
+
 def strip_invisible(text: str) -> str:
     """Remove invisible/format/smuggling characters.
 
@@ -79,6 +87,11 @@ def strip_invisible(text: str) -> str:
     """
     if text.isascii():
         return text  # ASCII contains no Cf/Co/Cs/Cn or variation selectors
+    # Fast path: decide per *distinct* character (cached), not per position.
+    # Typical non-ASCII text (curly quotes, accents, emoji) has no invisible
+    # characters at all and returns unchanged without a Python-level loop.
+    if not any(_invisible_char(c) for c in set(text)):
+        return text
     out: List[str] = []
     n = len(text)
     for i, ch in enumerate(text):
@@ -251,6 +264,120 @@ def squash(text: str) -> str:
     return "".join(c for c in text if c.isalnum())
 
 
+# ── Structural de-obfuscation ────────────────────────────────────────────
+# Two evasions survive character folding because they change *token*
+# structure rather than characters:
+#   * separator insertion inside words: "b-a-s-h", "s.y.s.t.e.m", "r m"
+#   * filler words between trigger words: "system really prompt"
+# `despace` and `drop_filler` undo them; detectors scan their output as
+# extra sources, never instead of the original text.
+
+_SEPARATORS = frozenset(".-_·•*~+|/\\")
+_SEP_TOKEN = re.compile(r"(?<!\S)(\S)((?:[.\-_·•*~+|/\\]\S){2,})(?=\s|$)")
+
+# Words that carry no instruction content: intensifiers, hedges, politeness
+# and discourse markers. Deliberately broad and generic rather than tuned to
+# the benchmark; the benchmark's `filler_novel` mutator measures how far this
+# generalises to words that are not on the list.
+FILLER_WORDS = frozenset("""
+    really kindly just now totally please pls plz very actually simply basically
+    literally seriously honestly definitely certainly absolutely truly quite
+    rather completely entirely fully quickly immediately promptly also still
+    even so well um uh umm er hmm like okay ok hey yo fyi btw perhaps maybe
+    surely obviously clearly merely quietly carefully gently right sure anyway
+    anyways essentially practically virtually somewhat super extremely highly
+    deeply strongly genuinely legitimately officially formally urgently asap
+    respectfully politely nicely thanks thank thx dear friend buddy bro pal
+""".split())
+_WORD = re.compile(r"[^\W_]+(?:'[^\W_]+)?")
+
+
+def despace(text: str) -> str:
+    """Rejoin characters an attacker spaced apart.
+
+    * one token of single characters joined by one repeated separator:
+      "b-a-s-h" / "s.y.s.t.e.m" / ":-(-)-{"  ->  "bash" / "system" / ":(){"
+    * a run of >= 3 single-character tokens: "b a s h", "b . a . s . h",
+      "무 시 하 고" -> "bash" / "무시하고"
+    Returns "" when nothing changed (callers skip the extra view).
+    """
+    if not text:
+        return ""
+    text = text[:MAX_VIEW_CHARS]
+
+    def _join_token(m):
+        tail = m.group(2)
+        sep = tail[0]
+        if any(tail[i] != sep for i in range(0, len(tail), 2)):
+            return m.group(0)
+        return m.group(1) + tail[1::2]
+
+    out = _SEP_TOKEN.sub(_join_token, text)
+    tokens = out.split()
+    joined: List[str] = []
+    run: List[str] = []
+
+    def _flush():
+        if len(run) >= 3:
+            seps = run[1::2]
+            if len(set(seps)) == 1 and seps[0] in _SEPARATORS:
+                joined.append("".join(run[0::2]))
+            else:
+                joined.append("".join(run))
+        else:
+            joined.extend(run)
+        run.clear()
+
+    for tok in tokens:
+        if len(tok) == 1:
+            run.append(tok)
+        else:
+            _flush()
+            joined.append(tok)
+    _flush()
+    out = " ".join(joined)
+    return out if out != " ".join(text.split()) else ""
+
+
+def drop_filler(text: str) -> str:
+    """Remove FILLER_WORDS (see above). Returns "" when nothing changed."""
+    if not text:
+        return ""
+    text = text[:MAX_VIEW_CHARS]
+    hit = False
+
+    def _drop(m):
+        nonlocal hit
+        if m.group(0).lower() in FILLER_WORDS:
+            hit = True
+            return ""
+        return m.group(0)
+
+    out = _WORD.sub(_drop, text)
+    return " ".join(out.split()) if hit else ""
+
+
+_ASCII_WORD = re.compile(r"(?<![^\W\d_])[A-Za-z][A-Za-z']*(?![^\W\d_])")
+
+
+def drop_foreign_words(text: str) -> str:
+    """In mostly non-Latin text, drop Latin-script words.
+
+    "Игнорируй все предыдущие seventeen инструкции" hides a Russian override
+    from phrase rules by inserting an English word. Returns "" when the text
+    is mostly Latin or nothing was dropped.
+    """
+    if not text or text.isascii():
+        return ""
+    text = text[:MAX_VIEW_CHARS]
+    letters = [c for c in text if c.isalpha()]
+    latin = sum(1 for c in letters if c.isascii())
+    if not letters or latin * 2 >= len(letters):
+        return ""
+    out = _ASCII_WORD.sub("", text)
+    return " ".join(out.split()) if out != text else ""
+
+
 def native_lower(text: str) -> str:
     """Canonical, lowercased, marks stripped, scripts left as they are."""
     return _strip_marks(canonicalize(text)).lower()
@@ -291,7 +418,7 @@ def has_smuggling(text: str) -> bool:
 #   * and, for long phrases, against the separator-free view, so
 #     "p r i v i l e g e  e s c a l a t i o n" is still caught.
 import re as _re  # noqa: E402
-from functools import lru_cache as _lru_cache  # noqa: E402
+_lru_cache = lru_cache
 
 _SUFFIX = r"(?:s|es|ed|d|ing|er|ers|ion|ions)?"
 SQUASH_MIN_LEN = 12
