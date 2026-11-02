@@ -1014,12 +1014,13 @@ def path_tier(path: str, method: str = "GET") -> str:
 class AuthResult:
     def __init__(self, ok: bool, status: int = 200, reason: str = "",
                  headers: Optional[Dict[str, str]] = None,
-                 session_token: Optional[str] = None):
+                 session_token: Optional[str] = None, principal=None):
         self.ok = ok
         self.status = status
         self.reason = reason
         self.headers = headers or {}
         self.session_token = session_token
+        self.principal = principal  # set on success for non-public routes
 
 
 def authenticate(handler, tier: str) -> AuthResult:
@@ -1168,7 +1169,7 @@ def authenticate(handler, tier: str) -> AuthResult:
         # rotating here would invalidate the token the client is holding.
         headers["X-CSRF-Token"] = get_csrf_token(session_token) or set_csrf_token(session_token)
     headers["X-Principal-Role"] = principal.role
-    return AuthResult(True, 200, "", headers, session_token)
+    return AuthResult(True, 200, "", headers, session_token, principal)
 
 
 

@@ -29,12 +29,13 @@ ENV OUTSIDE_MODEL_MODEL=qwen2.5:1.5b
 ENV OUTSIDE_MODEL_ENDPOINT=generate
 ENV OUTSIDE_MODEL_TIMEOUT=30
 
-# Run unprivileged: the code is read-only to the service user; only logs and
-# per-page policies are writable.
+# Run unprivileged: the code is read-only to the service user; only logs,
+# per-page policies and the agent tool workspace are writable.
+ENV GUARDRAIL_AGENT_WORKSPACE=/app/workspace
 RUN chmod +x /app/scripts/kill-switch.sh /app/tmux/guardrail-tmux.sh && \
-    mkdir -p /app/logs /app/policies/pages && \
+    mkdir -p /app/logs /app/policies/pages /app/workspace && \
     useradd --system --uid 10001 --home-dir /app --shell /usr/sbin/nologin guardrail && \
-    chown -R guardrail:guardrail /app/logs /app/policies
+    chown -R guardrail:guardrail /app/logs /app/policies /app/workspace
 USER 10001:10001
 
 EXPOSE 8083

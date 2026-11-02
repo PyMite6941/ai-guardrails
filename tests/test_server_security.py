@@ -182,6 +182,47 @@ for i in range(5000):
     lim.allow(f"id{i}")
 check("rate limiter table is bounded", len(lim.buckets) <= 100, len(lim.buckets))
 
+# ── Agent tools: confinement and authorization (unit level) ──────────────
+print("=== agent tools ===")
+_home = tempfile.mkdtemp(prefix="ag-agent-")
+os.environ["HOME"] = _home
+os.environ["GUARDRAIL_AGENT_WORKSPACE"] = os.path.join(_home, "ws")
+os.makedirs(os.environ["GUARDRAIL_AGENT_WORKSPACE"])
+import guardrail_server as gs  # noqa: E402
+from guardrail_users import Principal  # noqa: E402
+
+ws = gs.AGENT_WORKSPACE
+sibling = ws + "-evil"
+os.makedirs(sibling)
+with open(os.path.join(sibling, "x.txt"), "w") as fh:
+    fh.write("outside")
+os.symlink(os.path.join(ROOT, "guardrail.py"), os.path.join(ws, "link.py"))
+dev = Principal("api_key", "dev", "developer", "api_key")
+
+for label, path in [("parent traversal", "../../guardrail.py"),
+                    ("absolute project file", os.path.join(ROOT, "guardrail.py")),
+                    ("absolute system file", "/etc/hostname"),
+                    ("sibling dir sharing the prefix", sibling + "/x.txt"),
+                    ("symlink out of the workspace", "link.py"),
+                    ("NUL byte", "a\x00b")]:
+    out = gs.execute_agent_tool("file_read", {"path": path}, principal=dev)
+    check(f"file_read refuses {label}", "content" not in out, str(out)[:80])
+out = gs.execute_agent_tool("file_write", {"path": os.path.join(ROOT, "pwned.py"),
+                                           "content": "x = 1"}, principal=dev)
+check("file_write cannot touch the project", not os.path.exists(os.path.join(ROOT, "pwned.py"))
+      and not out.get("ok"), out)
+out = gs.execute_agent_tool("file_write", {"path": "notes/a.txt", "content": "hello"},
+                            principal=dev)
+check("file_write works inside the workspace",
+      out.get("ok") and open(os.path.join(ws, "notes", "a.txt")).read() == "hello", out)
+out = gs.execute_agent_tool("file_read", {"path": "notes/a.txt"}, principal=dev)
+check("file_read works inside the workspace", out.get("content") == "hello", out)
+
+for label, who in [("developer", dev), ("unknown caller", None)]:
+    out = gs.execute_agent_tool("emergency_contain", {}, principal=who)
+    check(f"emergency_contain denied to {label}",
+          out.get("blocked") and out.get("blocked_by") == "authorization", out)
+
 print()
 if FAILS:
     print(f"{len(FAILS)} FAILURE(S):")

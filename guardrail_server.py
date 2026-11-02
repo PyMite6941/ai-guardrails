@@ -187,7 +187,7 @@ AGENT_TOOLS: Dict[str, Dict[str, Any]] = {
     },
     "file_read": {
         "name": "file_read",
-        "description": "Read a file from the local filesystem (read-only).",
+        "description": "Read a file from the agent workspace (read-only).",
         "parameters": {
             "type": "object",
             "properties": {
@@ -216,11 +216,11 @@ AGENT_TOOLS: Dict[str, Dict[str, Any]] = {
     },
     "file_write": {
         "name": "file_write",
-        "description": "Write content to a file within the project directory (read + write guarded).",
+        "description": "Write content to a file in the agent workspace (read + write guarded).",
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "File path to write (within project dir)"},
+                "path": {"type": "string", "description": "File path to write, relative to the agent workspace"},
                 "content": {"type": "string", "description": "File content to write"},
             },
             "required": ["path", "content"],
@@ -377,15 +377,48 @@ def delete_chat_session(session_id: str) -> bool:
     return False
 
 
+# Agent file tools are confined to this directory. It is deliberately outside
+# the project: an agent that can write to the project can rewrite the
+# guardrail code and policies that constrain it (and gain code execution as
+# the server), and one that can read it can read .env files and audit logs.
+AGENT_WORKSPACE = os.path.realpath(os.path.expanduser(
+    os.environ.get("GUARDRAIL_AGENT_WORKSPACE", "~/.ai_guardrails_workspace")))
+AGENT_MAX_WRITE_BYTES = 1_000_000
+
+# Tools that do more than the "validate" permission every chat caller holds.
+# A tool call must never let a principal do what its role cannot do directly.
+AGENT_TOOL_PERMISSIONS = {"emergency_contain": "emergency"}
+
+
+def _agent_path(file_path: str) -> Optional[str]:
+    """Resolve a tool-supplied path inside AGENT_WORKSPACE, or None."""
+    if not isinstance(file_path, str) or not file_path or "\x00" in file_path:
+        return None
+    candidate = os.path.join(AGENT_WORKSPACE, file_path)  # absolute paths replace the base
+    resolved = os.path.realpath(candidate)
+    try:
+        inside = os.path.commonpath([resolved, AGENT_WORKSPACE]) == AGENT_WORKSPACE
+    except ValueError:
+        return None
+    return resolved if inside and resolved != AGENT_WORKSPACE else None
+
+
 def execute_agent_tool(tool_name: str, arguments: Dict[str, Any],
-                       session_token: Optional[str] = None) -> Dict[str, Any]:
+                       session_token: Optional[str] = None,
+                       principal=None) -> Dict[str, Any]:
     """Execute an agent tool with guardrail validation.
 
     Every tool call is validated through the guardrail engine before
-    execution. Returns the tool result or a blocked response.
+    execution, and privileged tools require the caller's own permission
+    (fail closed when the caller is unknown). Returns the tool result or a
+    blocked response.
     """
     if tool_name not in AGENT_TOOLS:
         return {"error": f"Unknown tool: {tool_name}"}
+    needed = AGENT_TOOL_PERMISSIONS.get(tool_name)
+    if needed and (principal is None or not principal.can(needed)):
+        return {"blocked": True, "blocked_by": "authorization",
+                "reason": f"tool '{tool_name}' requires the '{needed}' permission"}
 
     args = arguments or {}
 
@@ -422,11 +455,9 @@ def execute_agent_tool(tool_name: str, arguments: Dict[str, Any],
 
         elif tool_name == "file_read":
             file_path = args.get("path", "")
-            # Resolve and validate path — only allow within project dir
-            project_dir = os.path.dirname(os.path.abspath(__file__))
-            resolved = os.path.realpath(file_path)
-            if not resolved.startswith(os.path.realpath(project_dir)):
-                return {"error": "File access restricted to project directory"}
+            resolved = _agent_path(file_path)
+            if resolved is None:
+                return {"error": "File access restricted to the agent workspace"}
             if not os.path.exists(resolved):
                 return {"error": f"File not found: {file_path}"}
             if os.path.isdir(resolved):
@@ -448,11 +479,12 @@ def execute_agent_tool(tool_name: str, arguments: Dict[str, Any],
         elif tool_name == "file_write":
             file_path = args.get("path", "")
             content = args.get("content", "")
-            # Validate path — only allow within project dir
-            project_dir = os.path.dirname(os.path.abspath(__file__))
-            resolved = os.path.realpath(file_path)
-            if not resolved.startswith(os.path.realpath(project_dir)):
-                return {"error": "File write restricted to project directory"}
+            resolved = _agent_path(file_path)
+            if resolved is None:
+                return {"error": "File write restricted to the agent workspace"}
+            if not isinstance(content, str) or \
+                    len(content.encode("utf-8")) > AGENT_MAX_WRITE_BYTES:
+                return {"error": "File content too large (>1MB) or not text"}
             # Validate content through guardrails (fast, deterministic)
             file_validation = engine.validate_input(
                 content, page_id="file-write", agent_name="agent"
@@ -478,8 +510,8 @@ def execute_agent_tool(tool_name: str, arguments: Dict[str, Any],
                 os.makedirs(os.path.dirname(resolved), exist_ok=True)
                 with open(resolved, "w", encoding="utf-8") as f:
                     f.write(content)
-            except Exception as e:
-                return {"error": f"Failed to write file: {str(e)}"}
+            except OSError as e:
+                return {"error": f"Failed to write file: {e.strerror or type(e).__name__}"}
             return {
                 "ok": True,
                 "path": resolved,
@@ -513,7 +545,7 @@ def execute_agent_tool(tool_name: str, arguments: Dict[str, Any],
             }
 
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"tool failed: {type(e).__name__}"}
 
     return {"error": f"Tool {tool_name} not implemented"}
 
@@ -529,7 +561,8 @@ def psutil_boot_time() -> float:
 
 
 def agentic_plan_and_act(user_text: str, session: ChatSession,
-                         session_token: Optional[str] = None) -> Dict[str, Any]:
+                         session_token: Optional[str] = None,
+                         principal=None) -> Dict[str, Any]:
     """Run an agentic plan-act-review loop.
 
     1. Validate user input through guardrails
@@ -596,7 +629,8 @@ def agentic_plan_and_act(user_text: str, session: ChatSession,
     elif "system" in text_lower or "info" in text_lower:
         tool_name = "system_info"
         tool_args = {}
-    elif "contain" in text_lower or "emergency" in text_lower:
+    elif "emergency" in text_lower and "contain" in text_lower:
+        # Both words: "what does this file contain?" must not plan containment.
         tool_name = "emergency_contain"
         tool_args = {}
 
@@ -634,7 +668,8 @@ def agentic_plan_and_act(user_text: str, session: ChatSession,
     # Step 3: Act — execute tool if selected
     tool_result: Optional[Dict[str, Any]] = None
     if tool_name != "none":
-        tool_result = execute_agent_tool(tool_name, tool_args, session_token)
+        tool_result = execute_agent_tool(tool_name, tool_args, session_token,
+                                         principal=principal)
         trace.append({"step": "act", "tool": tool_name, "result": tool_result})
 
         # Validate tool output if it contains text
@@ -762,6 +797,7 @@ class Handler(BaseHTTPRequestHandler):
         If not ok, the handler should send the error and stop.
         """
         result = authenticate(self, tier)
+        self.principal = result.principal if result.ok else None
         return result, result.headers
 
     def _read_body(self):
@@ -1745,7 +1781,8 @@ class Handler(BaseHTTPRequestHandler):
 
             # Process based on mode — use compressed text to save tokens
             if agent_mode:
-                result = agentic_plan_and_act(compressed_text, session, session_token)
+                result = agentic_plan_and_act(compressed_text, session, session_token,
+                                              principal=getattr(self, "principal", None))
             else:
                 # Regular chat: validate input, generate response
                 input_validation = engine.validate_input(
