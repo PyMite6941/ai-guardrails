@@ -33,6 +33,7 @@
 #=============================================================================
 
 import hashlib
+import http.cookies
 import hmac
 import base64
 import ipaddress
@@ -40,6 +41,7 @@ import json
 import os
 import secrets
 import struct
+import threading
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
@@ -75,6 +77,11 @@ LOGIN_RATE_LIMIT = int(os.environ.get("GUARDRAIL_LOGIN_RATE_LIMIT", "5"))
 # nginx, an SSH tunnel). Without this every proxied request looks like it came
 # from 127.0.0.1: one shared rate-limit bucket and one shared login lockout.
 TRUST_PROXY = os.environ.get("GUARDRAIL_TRUST_PROXY", "0") == "1"
+# Which header carries the client address behind the proxy. Empty = try
+# CF-Connecting-IP, X-Real-IP, X-Forwarded-For in order. Set it to the one your
+# proxy overwrites (cloudflared: CF-Connecting-IP, nginx: X-Real-IP) so a
+# client cannot inject one of the others.
+PROXY_IP_HEADER = os.environ.get("GUARDRAIL_PROXY_IP_HEADER", "").strip()
 LOGIN_LOCKOUT_SECONDS = int(os.environ.get("GUARDRAIL_LOGIN_LOCKOUT_SECONDS", "300"))
 LOGIN_MAX_ATTEMPTS = int(os.environ.get("GUARDRAIL_LOGIN_MAX_ATTEMPTS", "5"))
 
@@ -695,28 +702,48 @@ def cleanup_sessions() -> int:
 # ── Rate limiter (token bucket per key-or-IP) ─────────────────────────────
 
 class RateLimiter:
-    """Simple token-bucket rate limiter keyed by identifier."""
+    """Sliding-window rate limiter keyed by identifier.
+
+    Thread-safe (the server is a ThreadingHTTPServer) and memory-bounded: an
+    attacker who varies the identifier cannot grow the table without limit,
+    because idle buckets are pruned and the table is capped at MAX_BUCKETS.
+    """
+
+    MAX_BUCKETS = 10_000
 
     def __init__(self, rate_per_minute: int):
         self.rate = max(rate_per_minute, 1)
-        self.buckets: Dict[str, deque] = defaultdict(deque)
+        self.buckets: Dict[str, deque] = {}
+        self._lock = threading.Lock()
+
+    def _prune(self, now: float) -> None:
+        for key in [k for k, w in self.buckets.items() if not w or w[-1] < now - 60]:
+            del self.buckets[key]
+        while len(self.buckets) >= self.MAX_BUCKETS:  # still full: drop oldest
+            del self.buckets[next(iter(self.buckets))]
 
     def allow(self, ident: str) -> bool:
         now = time.time()
-        window = self.buckets[ident]
-        while window and window[0] < now - 60:
-            window.popleft()
-        if len(window) >= self.rate:
-            return False
-        window.append(now)
-        return True
+        with self._lock:
+            window = self.buckets.get(ident)
+            if window is None:
+                if len(self.buckets) >= self.MAX_BUCKETS:
+                    self._prune(now)
+                window = self.buckets[ident] = deque()
+            while window and window[0] < now - 60:
+                window.popleft()
+            if len(window) >= self.rate:
+                return False
+            window.append(now)
+            return True
 
     def remaining(self, ident: str) -> int:
         now = time.time()
-        window = self.buckets.get(ident, deque())
-        while window and window[0] < now - 60:
-            window.popleft()
-        return max(self.rate - len(window), 0)
+        with self._lock:
+            window = self.buckets.get(ident, deque())
+            while window and window[0] < now - 60:
+                window.popleft()
+            return max(self.rate - len(window), 0)
 
 
 _rate_limiter = RateLimiter(RATE_LIMIT)
@@ -742,15 +769,23 @@ def _client_ip(handler) -> str:
         return peer
     if peer not in ("127.0.0.1", "::1"):
         return peer
-    for header in ("CF-Connecting-IP", "X-Real-IP", "X-Forwarded-For"):
+    headers = (PROXY_IP_HEADER,) if PROXY_IP_HEADER else \
+        ("CF-Connecting-IP", "X-Real-IP", "X-Forwarded-For")
+    for header in headers:
         try:
             value = handler.headers.get(header, "")
         except Exception:
             value = ""
-        if value:
-            first = value.split(",")[0].strip()
-            if first:
-                return first
+        if not value:
+            continue
+        # X-Forwarded-For is "client, proxy1, ...": a proxy *appends* the
+        # address it saw, so the left entries are whatever the client sent.
+        # Only the rightmost entry was written by our (single) trusted proxy.
+        candidate = value.split(",")[-1].strip()
+        try:
+            return str(ipaddress.ip_address(candidate))
+        except ValueError:
+            continue  # garbage must not become a fresh rate-limit identity
     return peer
 
 
@@ -925,11 +960,37 @@ _TIER_OF_PERMISSION = {
 }
 
 
+def normalize_path(path: str) -> str:
+    """Path as the router sees it: no query/fragment, no trailing slash."""
+    p = urlparse(path or "/").path or "/"
+    return p.rstrip("/") or "/"
+
+
+def login_ident_for(handler) -> str:
+    """Lockout key for a login attempt; the same everywhere it is used."""
+    return f"login:{_client_ip(handler)}"
+
+
+def session_token_from(handler) -> str:
+    """Session token from X-Session-Token or the `session` cookie."""
+    token = handler.headers.get("X-Session-Token", "")
+    if token:
+        return token
+    raw = handler.headers.get("Cookie", "")
+    if not raw:
+        return ""
+    jar = http.cookies.SimpleCookie()
+    try:
+        jar.load(raw)
+    except http.cookies.CookieError:
+        return ""
+    morsel = jar.get("session")
+    return morsel.value if morsel else ""
+
+
 def required_permission(path: str, method: str = "GET"):
     """The permission this request needs, or None when no route matches."""
-    p = (path or "/").split("?")[0]
-    if len(p) > 1:
-        p = p.rstrip("/")
+    p = normalize_path(path)
     for pattern, methods, permission in ROUTE_POLICY:
         if method in methods and re.match(pattern, p):
             return permission
@@ -965,10 +1026,10 @@ def authenticate(handler, tier: str) -> AuthResult:
     """Authenticate + authorize a request for the given tier."""
     cleanup_sessions()
 
+    # Always keyed on the client address. Keying on a client-supplied header
+    # (e.g. the X-API-Key prefix) let an unauthenticated caller pick a fresh
+    # bucket per request and bypass the limit entirely.
     ident = _client_ip(handler)
-    api_key = handler.headers.get("X-API-Key", "")
-    if api_key:
-        ident = f"key:{api_key[:8]}"
     if not _rate_limiter.allow(ident):
         return AuthResult(False, 429, "rate limit exceeded",
                           {"Retry-After": "60"})
@@ -978,10 +1039,10 @@ def authenticate(handler, tier: str) -> AuthResult:
 
     # ── Login rate limiting and account lockout ──
     # Apply stricter rate limiting to login endpoint.
-    path = handler.path
-    command = handler.command
-    if path == "/api/auth/login" and command == "POST":
-        login_ident = f"login:{_client_ip(handler)}"
+    # Normalized exactly like routing, so "/api/auth/login/" or
+    # "/api/auth/login?x" cannot reach the login handler while skipping lockout.
+    if normalize_path(handler.path) == "/api/auth/login" and handler.command == "POST":
+        login_ident = login_ident_for(handler)
         # Check if IP is locked out
         lockout_until = _login_lockouts.get(login_ident, 0)
         if lockout_until > time.time():
@@ -1026,9 +1087,7 @@ def authenticate(handler, tier: str) -> AuthResult:
     from guardrail_users import (ROLE_PERMISSIONS, Principal, get_user,
                                  verify_api_key)
 
-    path = (handler.path or "/").split("?")[0]
-    if len(path) > 1:
-        path = path.rstrip("/")
+    path = normalize_path(handler.path)
     method = handler.command
     permission = required_permission(path, method)
 
@@ -1043,8 +1102,7 @@ def authenticate(handler, tier: str) -> AuthResult:
         return AuthResult(True, 200, "", cors_headers)
 
     # ── Resolve the principal ──
-    session_token = handler.headers.get("X-Session-Token", "") or \
-        handler.headers.get("Cookie", "").replace("session=", "", 1)
+    session_token = session_token_from(handler)
     session = validate_session(session_token) if session_token else None
 
     supplied_key = handler.headers.get("X-API-Key", "") or \
@@ -1141,16 +1199,31 @@ def send_auth_error(handler, result: AuthResult) -> None:
               result.headers)
 
 
+class BodyError(ValueError):
+    """Malformed or oversized request body; carries the HTTP status to send."""
+
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+
+
 def read_body_limited(handler, max_size: int = MAX_BODY_SIZE) -> bytes:
-    length = int(handler.headers.get("Content-Length", 0))
+    """Read exactly Content-Length bytes, refusing anything unbounded.
+
+    A negative or non-numeric Content-Length used to reach rfile.read(-1),
+    which reads until the client hangs up: one connection could pin a server
+    thread and buffer unbounded data.
+    """
+    if handler.headers.get("Transfer-Encoding"):
+        raise BodyError(411, "chunked request bodies are not supported")
+    raw = (handler.headers.get("Content-Length") or "0").strip()
+    if not raw.isdigit():
+        raise BodyError(400, "invalid Content-Length")
+    length = int(raw)
     if length == 0:
         return b""
     if length > max_size:
-        try:
-            handler.rfile.read(max_size)
-        except Exception:
-            pass
-        raise ValueError("request body too large")
+        raise BodyError(413, "request body too large")
     return handler.rfile.read(length)
 
 

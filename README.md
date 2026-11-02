@@ -492,7 +492,7 @@ Standalone (no server) client-side rules are included.
 
 ## Tests
 
-Twelve suites, all stdlib, each in its own process:
+Thirteen suites, all stdlib, each in its own process:
 
 ```
 python3 tests/run_all.py              # all suites
@@ -512,6 +512,7 @@ python3 tests/run_all.py detection    # just one
 | `test_auth.py` | auth, rate limiting, host validation, CSRF |
 | `test_security.py` | default-deny, per-user 2FA, backup-code hashing, roles, API keys |
 | `test_classifier_e2e.py` | the model layer actually runs on `/api/validate`: mock endpoint in place of Nebius, escalate-only behaviour, bearer key delivery, counter accuracy |
+| `test_server_security.py` | live-server attacks: login lockout via path variants, rate-limit bypass via rotating API keys, negative/oversized Content-Length, spoofed `X-Forwarded-For`, exception text leakage |
 | `test_detection.py` | evasion resistance (homoglyph, zero-width, tag/emoji smuggling, leet, spacing, encodings, templates, 2 non-Latin scripts), false-positive traps, ReDoS time budget, fail-closed wiring |
 
 ## Detection benchmark
@@ -605,7 +606,7 @@ Key capabilities:
 - Rust Aho-Corasick pattern scanner (rust/src/main.rs) for memory-safe, ReDoS-proof hot-path matching with Python fallback.
 - Docker: containerized model server (docker/model_server.py), hardened compose stack (inner model :8000 + outside monitor :8001), ephemeral cage runner (docker/run_cage.sh).
 - Additional modules: guardrail_modes.py, guardrail_risk.py, guardrail_integrity.py, guardrail_testing.py, guardrail_classifier.py, guardrail_step_monitor.py, guardrail_policy_versioning.py, guardrail_human_loop.py, guardrail_canary.py, guardrail_prompt_injection.py, guardrail_leakage.py, guardrail_hardware.py, guardrail_updates.py, guardrail_users.py (accounts, roles, TOTP, API keys), guardrail_models.py (model providers), guardrail_assistant.py, guardrail_secret_stripper.py, guardrail_token_compressor.py.
-- 11 test suites (engine, oversight, cage breakout, modes/risk/integrity, classifier/step/scanner, human loop, canary, hardening, auth, security, model-layer end-to-end) plus an adversarial suite: 100% catch rate, 0% false positives. `test_classifier_e2e.py` stands a mock OpenAI-compatible endpoint in place of Nebius and proves the model layer is really consulted on the validation path.
+- 13 test suites (engine, oversight, cage breakout, modes/risk/integrity, classifier/step/scanner, human loop, canary, hardening, auth, security, model-layer end-to-end, detection, live-server attacks) plus the gated detection benchmark in `benchmarks/`. `test_classifier_e2e.py` stands a mock OpenAI-compatible endpoint in place of Nebius and proves the model layer is really consulted on the validation path.
 - Dev environment: Raspberry Pi (aarch64), offline-first, no runtime network dependency.
 ```
 

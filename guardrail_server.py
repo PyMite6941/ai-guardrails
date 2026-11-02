@@ -69,7 +69,8 @@ from guardrail_token_compressor import compress_for_model, estimate_tokens
 from guardrail_assistant import get_assistant
 from guardrail_auth import (
     authenticate, path_tier, send_json, send_auth_error,
-    read_body_limited, create_session, validate_session, destroy_session,
+    read_body_limited, BodyError, session_token_from, login_ident_for,
+    create_session, validate_session, destroy_session,
     verify_password, has_password, set_password, is_auth_configured,
     is_2fa_configured, enable_2fa, disable_2fa, verify_2fa_code,
     verify_backup_code, session_2fa_verified, session_2fa_pending,
@@ -766,19 +767,26 @@ class Handler(BaseHTTPRequestHandler):
     def _read_body(self):
         return read_body_limited(self)
 
-    def do_OPTIONS(self):  # noqa: N802
+    def _dispatch(self, impl):
+        """Run a method handler; never leak exception text to the client."""
         try:
-            self._do_options_impl()
-        except Exception as e:
+            impl()
+        except BodyError as e:
+            self.close_connection = True  # unread body bytes poison keep-alive
+            self._send_error_json(e.status, str(e))
+        except Exception:
             import traceback
             traceback.print_exc()
-            try:
-                self.send_response(500)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": "internal server error: " + str(e)}).encode("utf-8"))
-            except Exception:
-                pass
+            self._send_error_json(500, "internal server error")
+
+    def _send_error_json(self, status, message):
+        try:
+            _json_response(self, status, {"error": message})
+        except Exception:
+            pass
+
+    def do_OPTIONS(self):  # noqa: N802
+        self._dispatch(self._do_options_impl)
 
     def _do_options_impl(self):  # noqa: N802
         """CORS preflight."""
@@ -797,18 +805,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):  # noqa: N802
-        try:
-            self._do_get_impl()
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            try:
-                self.send_response(500)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": "internal server error: " + str(e)}).encode("utf-8"))
-            except Exception:
-                pass
+        self._dispatch(self._do_get_impl)
 
     def _do_get_impl(self):  # noqa: N802
         path, _ = self._route()
@@ -917,8 +914,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         # ── Auth endpoints (GET) ──────────────────────────────────
         if path == "/api/auth/session":
-            session_token = self.headers.get("X-Session-Token", "") or \
-                self.headers.get("Cookie", "").replace("session=", "", 1)
+            session_token = session_token_from(self)
             session = validate_session(session_token) if session_token else None
             username = (session or {}).get("username")
             from guardrail_users import get_user, user_2fa_state
@@ -934,8 +930,7 @@ class Handler(BaseHTTPRequestHandler):
             }, cors_headers)
             return
         if path == "/api/auth/2fa/status":
-            session_token = self.headers.get("X-Session-Token", "") or \
-                self.headers.get("Cookie", "").replace("session=", "", 1)
+            session_token = session_token_from(self)
             session = validate_session(session_token) if session_token else None
             username = (session or {}).get("username", "admin")
             from guardrail_users import user_2fa_state
@@ -987,8 +982,7 @@ class Handler(BaseHTTPRequestHandler):
             }, cors_headers)
             return
         if path == "/api/models/selected":
-            session_token = self.headers.get("X-Session-Token", "") or \
-                self.headers.get("Cookie", "").replace("session=", "", 1)
+            session_token = session_token_from(self)
             session = validate_session(session_token) if session_token else None
             provider_key = get_session_provider(session)
             provider = None
@@ -1063,18 +1057,7 @@ class Handler(BaseHTTPRequestHandler):
         _json_response(self, 404, {"error": "not found"}, cors_headers)
 
     def do_PUT(self):  # noqa: N802
-        try:
-            self._do_put_impl()
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            try:
-                self.send_response(500)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": "internal server error: " + str(e)}).encode("utf-8"))
-            except Exception:
-                pass
+        self._dispatch(self._do_put_impl)
 
     def _do_put_impl(self):  # noqa: N802
         path, _ = self._route()
@@ -1108,18 +1091,7 @@ class Handler(BaseHTTPRequestHandler):
         _json_response(self, 404, {"error": "not found"}, cors_headers)
 
     def do_DELETE(self):  # noqa: N802
-        try:
-            self._do_delete_impl()
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            try:
-                self.send_response(500)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": "internal server error: " + str(e)}).encode("utf-8"))
-            except Exception:
-                pass
+        self._dispatch(self._do_delete_impl)
 
     def _do_delete_impl(self):  # noqa: N802
         path, _ = self._route()
@@ -1201,18 +1173,7 @@ class Handler(BaseHTTPRequestHandler):
         _json_response(self, 404, {"error": "not found"}, cors_headers)
 
     def do_POST(self):  # noqa: N802
-        try:
-            self._do_post_impl()
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            try:
-                self.send_response(500)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": "internal server error: " + str(e)}).encode("utf-8"))
-            except Exception:
-                pass
+        self._dispatch(self._do_post_impl)
 
     def _do_post_impl(self):  # noqa: N802
         path, _ = self._route()
@@ -1250,7 +1211,7 @@ class Handler(BaseHTTPRequestHandler):
                 twofa_enabled = bool(user_rec.get("totp_enabled")) or (
                     username == "admin" and is_2fa_configured())
                 # Clear login attempts on successful password
-                login_ident = f"login:{self.client_address[0] if self.client_address else 'unknown'}"
+                login_ident = login_ident_for(self)
                 _clear_login_attempts(login_ident)
                 # Log successful password step
                 _log_auth_event("login_password_ok", _client_ip(self),
@@ -1311,7 +1272,7 @@ class Handler(BaseHTTPRequestHandler):
                     }, _h, session_token=session_token)
             else:
                 # Record failed login attempt
-                login_ident = f"login:{self.client_address[0] if self.client_address else 'unknown'}"
+                login_ident = login_ident_for(self)
                 _record_login_attempt(login_ident, success=False)
                 # Log failed login
                 _log_auth_event("login_failure", _client_ip(self),
@@ -1321,8 +1282,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/auth/logout":
-            session_token = self.headers.get("X-Session-Token", "") or \
-                self.headers.get("Cookie", "").replace("session=", "", 1)
+            session_token = session_token_from(self)
             destroy_session(session_token)
             _log_auth_event("logout", _client_ip(self),
                            self.headers.get("User-Agent", ""))
@@ -1341,8 +1301,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             totp_code = body.get("totp_code", "")
             backup_code = body.get("backup_code", "")
-            session_token = self.headers.get("X-Session-Token", "") or \
-                self.headers.get("Cookie", "").replace("session=", "", 1)
+            session_token = session_token_from(self)
             session = validate_session(session_token) if session_token else None
             if not session or not session.get("2fa_pending"):
                 _json_response(self, 400, {"error": "no 2FA-pending session"},
@@ -1371,8 +1330,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/auth/2fa/disable":
-            session_token = self.headers.get("X-Session-Token", "") or \
-                self.headers.get("Cookie", "").replace("session=", "", 1)
+            session_token = session_token_from(self)
             session = validate_session(session_token) if session_token else None
             if not session_2fa_verified(session):
                 _json_response(self, 403, {"error": "2FA verification required"},
@@ -1536,8 +1494,7 @@ class Handler(BaseHTTPRequestHandler):
                     }, cors_headers)
                     return
 
-            session_token = self.headers.get("X-Session-Token", "") or \
-                self.headers.get("Cookie", "").replace("session=", "", 1)
+            session_token = session_token_from(self)
             session = validate_session(session_token) if session_token else None
             if not session:
                 _json_response(self, 401, {"error": "authentication required"},
@@ -1749,8 +1706,7 @@ class Handler(BaseHTTPRequestHandler):
                 session.system_prompt = system_prompt
 
             # Validate session access (auth required for state-changing)
-            session_token = self.headers.get("X-Session-Token", "") or \
-                self.headers.get("Cookie", "").replace("session=", "", 1)
+            session_token = session_token_from(self)
             sess = validate_session(session_token) if session_token else None
             if not sess:
                 _json_response(self, 401, {"error": "authentication required"},
@@ -1882,8 +1838,7 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.loads(self._read_body() or b"{}")
             except json.JSONDecodeError:
                 body = {}
-            session_token = self.headers.get("X-Session-Token", "") or \
-                self.headers.get("Cookie", "").replace("session=", "", 1)
+            session_token = session_token_from(self)
             session = validate_session(session_token) if session_token else None
             username = (session or {}).get("username", "admin")
             from guardrail_users import get_user, user_2fa_state

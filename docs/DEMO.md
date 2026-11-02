@@ -61,7 +61,13 @@ GUARDRAIL_RATE_LIMIT=240 \
   127.0.0.1. **Without it, every visitor shares one 60-request/minute bucket and
   one 5-failure login lockout — one person mistyping a password locks out the
   judge.** Forwarded headers are only honoured from a loopback peer, so a remote
-  client cannot spoof its own IP.
+  client cannot spoof its own IP. From `X-Forwarded-For` only the rightmost
+  entry (the one your proxy appended) is used; the entries to its left are
+  whatever the client sent.
+- `GUARDRAIL_PROXY_IP_HEADER` pins the header to the one your proxy
+  *overwrites*: `CF-Connecting-IP` for cloudflared, `X-Real-IP` for nginx. Set
+  it in production; otherwise a client behind nginx could send its own
+  `CF-Connecting-IP` and pick its rate-limit identity.
 - `GUARDRAIL_RATE_LIMIT=240` is for demos only; the default 60/min is right for
   a single operator.
 
