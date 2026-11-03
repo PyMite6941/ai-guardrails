@@ -1,0 +1,12 @@
+# Every change needs review from the repository owner before it can merge
+# into main (enforced by the "Protect main" ruleset: code-owner review).
+*                       @PyMite6941
+
+# Security-critical paths, listed explicitly so the intent survives if the
+# catch-all above is ever narrowed.
+/.github/               @PyMite6941
+/guardrail*.py          @PyMite6941
+/outer_monitor.py       @PyMite6941
+/policies/              @PyMite6941
+/benchmarks/thresholds.json @PyMite6941
+/docker/                @PyMite6941

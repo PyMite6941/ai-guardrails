@@ -124,7 +124,16 @@ class LeakagePrevention:
 
     # ── Output scanning ─────────────────────────────────────────────
 
-    def scan_output(self, output: str) -> Tuple[bool, str, Optional[str]]:
+    def scan_input(self, text: str) -> Tuple[bool, str, Optional[str]]:
+        """Scan user/tool *input*: canaries, secrets and exfiltration URLs.
+
+        The system-prompt marker step is skipped: a user asking "what is a
+        system prompt?" cannot leak ours. Extraction attempts in input are
+        caught in context by guardrail_prompt_injection.
+        """
+        return self.scan_output(text, check_markers=False)
+
+    def scan_output(self, output: str, check_markers: bool = True) -> Tuple[bool, str, Optional[str]]:
         """Scan model output for leakage / exfiltration.
 
         Returns (safe, reason, matched_marker).
@@ -148,7 +157,7 @@ class LeakagePrevention:
                 )
 
         # 2. System prompt leakage in output
-        for marker in SYSTEM_LEAKAGE_OUTPUT_PATTERNS:
+        for marker in (SYSTEM_LEAKAGE_OUTPUT_PATTERNS if check_markers else ()):
             if marker.casefold() in normalized:
                 self.stats["blocks"] += 1
                 self.stats["leakage_blocks"] += 1
@@ -211,3 +220,7 @@ def get_prevention() -> LeakagePrevention:
 
 def scan_output(output: str) -> Tuple[bool, str, Optional[str]]:
     return get_prevention().scan_output(output)
+
+
+def scan_input(text: str) -> Tuple[bool, str, Optional[str]]:
+    return get_prevention().scan_input(text)
