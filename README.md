@@ -492,10 +492,11 @@ Standalone (no server) client-side rules are included.
 
 ## Tests
 
-Eleven suites, all stdlib, all runnable at once:
+Thirteen suites, all stdlib, each in its own process:
 
 ```
-for t in tests/*.py; do python3 "$t" || echo "FAILED $t"; done
+python3 tests/run_all.py              # all suites
+python3 tests/run_all.py detection    # just one
 ```
 
 | suite | covers |
@@ -511,6 +512,83 @@ for t in tests/*.py; do python3 "$t" || echo "FAILED $t"; done
 | `test_auth.py` | auth, rate limiting, host validation, CSRF |
 | `test_security.py` | default-deny, per-user 2FA, backup-code hashing, roles, API keys |
 | `test_classifier_e2e.py` | the model layer actually runs on `/api/validate`: mock endpoint in place of Nebius, escalate-only behaviour, bearer key delivery, counter accuracy |
+| `test_server_security.py` | live-server attacks: login lockout via path variants, rate-limit bypass via rotating API keys, negative/oversized Content-Length, spoofed `X-Forwarded-For`, exception text leakage |
+| `test_detection.py` | evasion resistance (homoglyph, zero-width, tag/emoji smuggling, leet, spacing, encodings, templates, 2 non-Latin scripts), false-positive traps, ReDoS time budget, fail-closed wiring |
+
+## Detection benchmark
+
+`benchmarks/run_benchmark.py` measures detection and false-positive rates
+instead of asserting them. It takes the seed attacks in
+`benchmarks/corpus/attacks.jsonl` (instruction override, prompt extraction,
+jailbreak personas, chat-template injection, indirect injection,
+exfiltration, tool abuse; 10 languages), rewrites each with 16 published
+evasion techniques (`benchmarks/mutators.py`), and scores them alongside the
+benign corpus, which deliberately includes trap prompts ("abundant",
+"secret santa", "enable developer mode on Android").
+
+```
+python3 benchmarks/run_benchmark.py                # gate against thresholds.json
+python3 benchmarks/run_benchmark.py --seeds 20     # fuzz with more seeds
+python3 benchmarks/run_benchmark.py --show-misses  # list what got through
+```
+
+| detector | detection | false positives |
+|---|---|---|
+| prompt-injection layer, before this release | 30.5% | 22.9% |
+| prompt-injection layer, now | 98.9% | 0.0% |
+| full input pipeline (default policy) | 98.2% | 18.1% (generic default keywords: see thresholds note) |
+
+Evasions now covered include spaced-out letters (`b-a-s-h`, 94%), filler words
+between trigger words, and Latin words inserted into non-Latin text. The
+`filler_novel` mutator inserts words the detector has never seen (88%); that
+is the honest number for arbitrary insertion.
+
+### Holdout: independently labelled datasets
+
+The corpus above was written alongside the rules, so it flatters them.
+`benchmarks/external_eval.py` scores the detector on public datasets labelled
+by other people. Misses are studied on the **train** splits only; the
+**test** splits are never read row by row and are the numbers that count.
+
+```
+python3 benchmarks/external_eval.py                          # holdout numbers
+python3 benchmarks/external_eval.py --split train --show-misses 20
+```
+
+| dataset (test split) | attacks caught | false positives |
+|---|---|---|
+| [jackhhao/jailbreak-classification](https://huggingface.co/datasets/jackhhao/jailbreak-classification), before | 54.0% | 0.8% |
+| jackhhao/jailbreak-classification, now | 76.3% | 0.8% |
+| [deepset/prompt-injections](https://huggingface.co/datasets/deepset/prompt-injections), before | 3.3% | 0.0% |
+| deepset/prompt-injections, now | 15.0% | 0.0% |
+| [databricks-dolly-15k](https://huggingface.co/datasets/databricks/databricks-dolly-15k) (1,000 benign instructions) | n/a | 0.0% |
+
+Read the deepset number with its labels in mind: it counts topic hijacking of
+a news bot ("You are Volkswagen. What do you think of Mercedes?") and plain
+role-play as injection. A context-free text detector cannot and should not
+block those for every application. Pair this layer with the model classifier
+(`guardrail_classifier.py`) and per-page policies for that class.
+
+Scoring: critical/high findings block alone; medium findings (role-play
+framing, "forget everything", a vendor's content policy named) are weak
+signals that block only in combination, so ordinary role-play requests pass.
+
+CI fails if any number drops below `benchmarks/thresholds.json`. The thresholds
+only move up.
+
+## Continuous security (GitHub Actions)
+
+| workflow | what it does |
+|---|---|
+| `ci.yml` | test suites on Python 3.9–3.13, Node package test, Docker build + non-root import/health smoke test, flake8, gated detection benchmark |
+| `security.yml` | CodeQL (Python, JS, Actions; `security-extended`), Bandit SAST to code scanning + gate, TruffleHog secret scan of full history, dependency review on PRs |
+| `scorecard.yml` | OpenSSF Scorecard supply-chain checks |
+| `research.yml` | weekly: fuzz the detectors with new random seeds (opens a `detection-regression` issue on a miss), and an arXiv digest of new prompt-injection / jailbreak / guardrail-evasion papers as a `research` triage issue |
+| `publish.yml` | npm publish only after all suites and the benchmark pass, with signed provenance |
+
+All third-party actions are pinned to full commit SHAs, default token
+permissions are read-only, and Dependabot keeps actions, npm, pip, Docker
+and bundler dependencies current.
 
 `python3 guardrail_testing.py` runs the adversarial suite (catch rate + false-positive rate).
 
@@ -563,7 +641,7 @@ Key capabilities:
 - Rust Aho-Corasick pattern scanner (rust/src/main.rs) for memory-safe, ReDoS-proof hot-path matching with Python fallback.
 - Docker: containerized model server (docker/model_server.py), hardened compose stack (inner model :8000 + outside monitor :8001), ephemeral cage runner (docker/run_cage.sh).
 - Additional modules: guardrail_modes.py, guardrail_risk.py, guardrail_integrity.py, guardrail_testing.py, guardrail_classifier.py, guardrail_step_monitor.py, guardrail_policy_versioning.py, guardrail_human_loop.py, guardrail_canary.py, guardrail_prompt_injection.py, guardrail_leakage.py, guardrail_hardware.py, guardrail_updates.py, guardrail_users.py (accounts, roles, TOTP, API keys), guardrail_models.py (model providers), guardrail_assistant.py, guardrail_secret_stripper.py, guardrail_token_compressor.py.
-- 11 test suites (engine, oversight, cage breakout, modes/risk/integrity, classifier/step/scanner, human loop, canary, hardening, auth, security, model-layer end-to-end) plus an adversarial suite: 100% catch rate, 0% false positives. `test_classifier_e2e.py` stands a mock OpenAI-compatible endpoint in place of Nebius and proves the model layer is really consulted on the validation path.
+- 13 test suites (engine, oversight, cage breakout, modes/risk/integrity, classifier/step/scanner, human loop, canary, hardening, auth, security, model-layer end-to-end, detection, live-server attacks) plus the gated detection benchmark in `benchmarks/`. `test_classifier_e2e.py` stands a mock OpenAI-compatible endpoint in place of Nebius and proves the model layer is really consulted on the validation path.
 - Dev environment: Raspberry Pi (aarch64), offline-first, no runtime network dependency.
 ```
 

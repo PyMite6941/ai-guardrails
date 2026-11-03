@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run test suites
+        run: python tests/run_all.py
+
+  node:
+    name: Node package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "20"
+      - run: npm test
+
+  docker:
+    name: Docker image smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build
+        run: docker build -f docker/Dockerfile -t ai-guardrails:ci .
+      - name: Every module imports inside the image, as the unprivileged user
+        run: |
+          docker run --rm --entrypoint python3 ai-guardrails:ci -c "
+          import os, glob, importlib
+          assert os.getuid() != 0, 'container must not run as root'
+          for f in sorted(glob.glob('/app/guardrail*.py')) + ['/app/outer_monitor.py']:
+              importlib.import_module(os.path.basename(f)[:-3])
+          print('all modules import as uid', os.getuid())
+          "
+      - name: Server starts and answers health checks
+        run: |
+          docker run -d --name ag -p 8083:8083 -e GUARDRAIL_ADMIN_PASSWORD="ci-$RANDOM-Pass!" ai-guardrails:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8083/api/health; then exit 0; fi
+            sleep 2
+          done
+          docker logs ag
+          exit 1
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - run: pip install flake8==7.5.0
+      # Hard gate: syntax errors, undefined names, invalid comparisons.
+      - name: flake8 (errors)
+        run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+      # Full style report against .flake8, informational until the backlog is cleared.
+      - name: flake8 (style, non-blocking)
+        run: flake8 . --count --exit-zero --statistics
+
+  benchmark:
+    name: Detection benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Run benchmark (gated by benchmarks/thresholds.json)
+        run: |
+          set -o pipefail
+          python benchmarks/run_benchmark.py --seeds 3 --json benchmark.json | tee benchmark.txt
+      # Independent, externally labelled datasets (test splits = holdout).
+      # Cached so PR runs do not refetch; floors in thresholds.json "external".
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: benchmarks/external
+          key: external-eval-${{ hashFiles('benchmarks/external_eval.py') }}
+      - name: Holdout evaluation on external datasets (gated)
+        run: |
+          set -o pipefail
+          python benchmarks/external_eval.py --gate --json external.json | tee external.txt
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo '## Guardrail detection benchmark'
+            echo '```'
+            grep -vE '^\s+MISS' benchmark.txt || true
+            echo '```'
+            echo '## Holdout: external datasets (test splits)'
+            echo '```'
+            cat external.txt 2>/dev/null || echo "not run"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: benchmark-report
+          path: |
+            benchmark.json
+            external.json
+          retention-days: 30

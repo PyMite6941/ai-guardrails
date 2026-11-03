@@ -1,7 +1,7 @@
 {
   "name": "@pymite6941/ai-guardrails",
   "version": "1.0.0",
-  "description": "AI Guardrails — customizable per-web-page input/output guardrails for LLM apps. Clyde-inspired engine, web config UI, tmux + Docker manageable, npm publishable.",
+  "description": "AI Guardrails \u2014 customizable per-web-page input/output guardrails for LLM apps. Clyde-inspired engine, web config UI, tmux + Docker manageable, npm publishable.",
   "main": "index.js",
   "types": "index.d.ts",
   "scripts": {
@@ -10,7 +10,17 @@
     "start": "tmux/guardrail-tmux.sh start",
     "publish": "npm publish --access public"
   },
-  "keywords": ["guardrails", "llm", "ai", "input-validation", "output-validation", "clyde", "prompt-injection", "pii", "web-page"],
+  "keywords": [
+    "guardrails",
+    "llm",
+    "ai",
+    "input-validation",
+    "output-validation",
+    "clyde",
+    "prompt-injection",
+    "pii",
+    "web-page"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -54,7 +64,17 @@
     "scripts/cron/",
     "policies/",
     "docker/",
-    "tmux/"
+    "tmux/",
+    "guardrail_normalize.py",
+    "guardrail_net.py",
+    "tests/test_detection.py",
+    "tests/test_server_security.py",
+    "benchmarks/*.py",
+    "benchmarks/thresholds.json",
+    "benchmarks/corpus/",
+    "SECURITY.md"
   ],
-  "engines": { "node": ">=18" }
+  "engines": {
+    "node": ">=18"
+  }
 }

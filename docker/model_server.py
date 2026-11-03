@@ -27,6 +27,10 @@ UPSTREAM_BASE = (os.environ.get("OLLAMA_BASE_URL")
                  or "").rstrip("/")
 UPSTREAM_API_KEY = os.environ.get("UPSTREAM_API_KEY")
 
+# urllib also opens file:// and ftp:// URLs; only ever talk HTTP(S) upstream.
+if UPSTREAM_BASE and not UPSTREAM_BASE.lower().startswith(("http://", "https://")):
+    raise SystemExit(f"Refusing non-HTTP(S) upstream URL: {UPSTREAM_BASE.split(':', 1)[0]}://...")
+
 
 def _upstream_chat(prompt: str) -> str:
     """Proxy to an upstream Ollama/OpenAI-compatible model API."""
@@ -44,7 +48,7 @@ def _upstream_chat(prompt: str) -> str:
             headers["Authorization"] = f"Bearer {UPSTREAM_API_KEY}"
         req = urllib.request.Request(UPSTREAM_BASE + "/api/chat",
                                      data=data, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:  # nosec B310 - scheme checked at startup
             body = resp.read().decode("utf-8", errors="replace")
         try:
             j = json.loads(body)

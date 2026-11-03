@@ -16,6 +16,7 @@ import json
 import os
 import re
 import urllib.request
+from guardrail_net import urlopen_http  # noqa: E402
 import urllib.error
 from typing import Optional, Dict, Any, Tuple
 
@@ -126,7 +127,7 @@ class GuardrailClassifier:
                 },
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=self.config.timeout) as resp:
+            with urlopen_http(req, timeout=self.config.timeout) as resp:
                 body = resp.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as e:
             self.stats["errors"] += 1

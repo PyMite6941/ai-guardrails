@@ -29,22 +29,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple, Callable
 
-# Optional memory-safe Rust pattern scanner (Aho-Corasick, no ReDoS / buffer
-# overflows). Falls back to Python substring scan if unavailable.
-try:  # noqa: E402
-    from guardrail_rust_scanner import scan as _rust_scan
-except Exception:  # pragma: no cover - fallback only
-    _rust_scan = None
-
-
-def _rust_scan_patterns(patterns: List[str], text: str) -> Optional[Dict[str, Any]]:
-    """Scan text against patterns via Rust scanner; None if unavailable."""
-    if _rust_scan is None:
-        return None
-    try:
-        return _rust_scan(patterns, text)
-    except Exception:
-        return None
+# Evasion-resistant normalization and policy phrase matching.
+from guardrail_normalize import (  # noqa: E402
+    canonicalize as _nz_canonicalize, decode_smuggled as _nz_decode_smuggled,
+    PhraseViews as _PhraseViews,
+)
 
 
 # Prompt injection / jailbreak detection (evasion-resistant) and info
@@ -206,15 +195,12 @@ DEFAULT_POLICY: Dict[str, Any] = {
 # ── Canonicalization ───────────────────────────────────────────────────────
 
 def canonicalize(text: str) -> str:
-    """Neutralize encoding-based evasion: strip zero-width/homoglyph tricks,
-    apply Unicode NFKC normalization, collapse whitespace."""
+    """Neutralize encoding-based evasion: strip invisible/format characters
+    (zero-width, bidi controls, tag and variation-selector smuggling), apply
+    NFKC, collapse whitespace. See guardrail_normalize for details."""
     if not text:
         return text
-    for ch in ZERO_WIDTH_CHARS:
-        text = text.replace(ch, "")
-    text = unicodedata.normalize("NFKC", text)
-    text = re.sub(r"\s+", " ", text)
-    return text
+    return _nz_canonicalize(text)
 
 
 # ── Policy ─────────────────────────────────────────────────────────────────
@@ -448,26 +434,28 @@ class GuardrailEngine:
     # ── Individual checks ────────────────────────────────────────────
 
     def _check_canonicalize(self, text: str, policy: GuardrailPolicy) -> Tuple[bool, str, str]:
+        # A hidden tag / variation-selector payload has no legitimate use in
+        # a prompt and would be erased by canonicalization before later
+        # checks could see it, so it is blocked here, fail-closed.
+        hidden = _nz_decode_smuggled(text)
+        if hidden:
+            return False, "", ("Hidden Unicode payload detected (tag / variation-selector "
+                               "smuggling)")
         if not policy.get("canonicalization_enabled", True):
             return True, text, "Canonicalization disabled"
-        if text != canonicalize(text):
-            return True, canonicalize(text), "Canonicalized (encoding tricks neutralized)"
+        canon = canonicalize(text)
+        if text != canon:
+            return True, canon, "Canonicalized (encoding tricks neutralized)"
         return True, text, "Canonicalization passed"
 
     def _check_input_patterns(self, text: str, policy: GuardrailPolicy) -> Tuple[bool, str, str]:
-        patterns = list(policy.get("blocked_input_patterns", []) or [])
-        rust = _rust_scan_patterns(patterns, text)
-        if rust is not None:
-            if rust["matched"]:
-                return False, "", f"Blocked input pattern: {rust['pattern']}"
-            return True, text, "Input pattern check passed (rust)"
-        text_lower = text.lower()
-        for pattern in patterns:
-            if pattern.lower() in text_lower:
-                return False, "", f"Blocked input pattern: {pattern}"
-        for keyword in list(policy.get("blocked_input_keywords", []) or []):
-            if keyword.lower() in text_lower:
-                return False, "", f"Blocked input keyword: {keyword}"
+        views = _PhraseViews(text)
+        hit = views.find(policy.get("blocked_input_patterns", []))
+        if hit:
+            return False, "", f"Blocked input pattern: {hit}"
+        hit = views.find(policy.get("blocked_input_keywords", []))
+        if hit:
+            return False, "", f"Blocked input keyword: {hit}"
         return True, text, "Input pattern check passed"
 
     def _check_input_length(self, text: str, policy: GuardrailPolicy) -> Tuple[bool, str, str]:
@@ -477,19 +465,13 @@ class GuardrailEngine:
         return True, text, "Input length check passed"
 
     def _check_output_patterns(self, text: str, policy: GuardrailPolicy) -> Tuple[bool, str, str]:
-        patterns = list(policy.get("blocked_output_patterns", []) or [])
-        rust = _rust_scan_patterns(patterns, text)
-        if rust is not None:
-            if rust["matched"]:
-                return False, "", f"Blocked output pattern: {rust['pattern']}"
-            return True, text, "Output pattern check passed (rust)"
-        text_lower = text.lower()
-        for pattern in patterns:
-            if pattern.lower() in text_lower:
-                return False, "", f"Blocked output pattern: {pattern}"
-        for keyword in list(policy.get("blocked_output_keywords", []) or []):
-            if keyword.lower() in text_lower:
-                return False, "", f"Blocked output keyword: {keyword}"
+        views = _PhraseViews(text)
+        hit = views.find(policy.get("blocked_output_patterns", []))
+        if hit:
+            return False, "", f"Blocked output pattern: {hit}"
+        hit = views.find(policy.get("blocked_output_keywords", []))
+        if hit:
+            return False, "", f"Blocked output keyword: {hit}"
         return True, text, "Output pattern check passed"
 
     def _check_output_length(self, text: str, policy: GuardrailPolicy) -> Tuple[bool, str, str]:
@@ -500,16 +482,9 @@ class GuardrailEngine:
         return True, text, "Output length check passed"
 
     def _check_harmful_content(self, text: str, policy: GuardrailPolicy) -> Tuple[bool, str, str]:
-        patterns = list(policy.get("harmful_content_patterns", []) or [])
-        rust = _rust_scan_patterns(patterns, text)
-        if rust is not None:
-            if rust["matched"]:
-                return False, "", f"Harmful content detected and reported: {rust['pattern']}"
-            return True, text, "Harmful content check passed (rust)"
-        text_lower = text.lower()
-        for pattern in patterns:
-            if pattern.lower() in text_lower:
-                return False, "", f"Harmful content detected and reported: {pattern}"
+        hit = _PhraseViews(text).find(policy.get("harmful_content_patterns", []))
+        if hit:
+            return False, "", f"Harmful content detected and reported: {hit}"
         return True, text, "Harmful content check passed"
 
     def _check_pii_credentials(self, text: str, policy: GuardrailPolicy) -> Tuple[bool, str, str]:
@@ -551,7 +526,8 @@ class GuardrailEngine:
         system-prompt leakage. Runs on both input and output.
         """
         if _pi_scan is None:
-            return True, text, "Prompt injection detector unavailable"
+            # Fail closed: a missing detector must never wave input through.
+            return False, "", "Prompt injection detector unavailable (fail-closed)"
         safe, reason, matched = _pi_scan(text)
         if not safe:
             return False, "", reason
@@ -566,7 +542,7 @@ class GuardrailEngine:
         censored by the engine.
         """
         if _leak_scan is None:
-            return True, text, "Leakage detector unavailable"
+            return False, "", "Leakage detector unavailable (fail-closed)"
         safe, reason, matched = _leak_scan(text)
         if not safe:
             return False, "", reason
@@ -585,7 +561,6 @@ class GuardrailEngine:
         cloud metadata/SSRF, runc-style escapes, kubelet/etcd, D-Bus/systemd,
         and pivot_root/chroot to the host filesystem.
         """
-        text_lower = text.lower()
         breakout_patterns = [
             # Classic container escape / host access
             "docker escape", "container escape", "break out", "escape container",
@@ -619,9 +594,9 @@ class GuardrailEngine:
             "escape this shell", "break out of this shell", "host filesystem",
             "reach the host", "reach host", "escape to host",
         ]
-        for pattern in breakout_patterns:
-            if pattern in text_lower:
-                return False, "", f"CONTAINER BREAKOUT ATTEMPT: {pattern}"
+        hit = _PhraseViews(text).find(breakout_patterns)
+        if hit:
+            return False, "", f"CONTAINER BREAKOUT ATTEMPT: {hit}"
         return True, text, "Container breakout check passed"
 
     def _check_system_prompt_leakage(self, text: str, policy: GuardrailPolicy) -> Tuple[bool, str, str]:
@@ -672,7 +647,14 @@ class GuardrailEngine:
         }
         policy = self.get_policy(page_id)
         current = user_input
-        for check_name in policy.get("checks", []):
+        # Run the cheap length check before the expensive scanners so an
+        # oversized input cannot be used to burn CPU (resource exhaustion,
+        # OWASP LLM10 "Unbounded Consumption").
+        checks = list(policy.get("checks", []))
+        if "input_length" in checks:
+            checks.remove("input_length")
+            checks.insert(0, "input_length")
+        for check_name in checks:
             if not self._check_enabled(check_name):
                 continue
             if check_name.startswith("output_") or check_name == "disclaimers":
@@ -721,7 +703,11 @@ class GuardrailEngine:
         }
         policy = self.get_policy(page_id)
         current = model_output
-        for check_name in policy.get("checks", []):
+        checks = list(policy.get("checks", []))
+        if "output_length" in checks:  # cheap check first (see validate_input)
+            checks.remove("output_length")
+            checks.insert(0, "output_length")
+        for check_name in checks:
             if not self._check_enabled(check_name):
                 continue
             if check_name.startswith("input_"):

@@ -1,0 +1,114 @@
+name: Continuous red-team & research
+
+# Weekly loop that keeps the guardrails improving:
+#   1. Fuzz the detectors with fresh random seeds (new mutation combinations
+#      every week). A gate failure opens or updates a "detection-regression" issue
+#      with the exact samples that got through.
+#   2. Pull new arXiv papers on prompt injection, jailbreaks and guardrail
+#      evasion into a triage issue, so new attacks become benchmark cases.
+
+on:
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: "Number of fuzz seeds"
+        default: "25"
+      days:
+        description: "Research look-back window (days)"
+        default: "7"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Weekly evasion fuzzing
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Fuzz with new seeds
+        id: fuzz
+        env:
+          SEEDS: ${{ inputs.seeds || '25' }}
+          OFFSET: ${{ github.run_number }}
+        run: |
+          set +e
+          BENCH_SKIP_ENGINE=1 python benchmarks/run_benchmark.py \
+            --seeds "$SEEDS" --seed-offset "$((OFFSET * 1000))" --show-misses \
+            --json fuzz.json > fuzz.txt 2>&1
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+          grep -vE '^\s+MISS' fuzz.txt >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-report
+          path: fuzz.json
+          retention-days: 90
+      - name: Open or update regression issue
+        if: steps.fuzz.outputs.status != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            echo "Weekly fuzzing found samples below the thresholds in \`benchmarks/thresholds.json\`."
+            echo "Run: $RUN_URL"
+            echo
+            echo '```'
+            grep -E 'GATE|^  - |MISS' fuzz.txt | head -150
+            echo '```'
+            echo
+            echo "Fix: add a rule or normalization step, add the sample to \`tests/test_detection.py\`, rerun the benchmark."
+          } > body.md
+          gh label create detection-regression --color B60205 --force >/dev/null
+          existing=$(gh issue list --label detection-regression --state open --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file body.md
+          else
+            gh issue create --title "Detection regression found by weekly fuzzing" \
+              --label detection-regression --body-file body.md
+          fi
+          exit 1
+
+  research:
+    name: Research digest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Build digest
+        env:
+          DAYS: ${{ inputs.days || '7' }}
+        run: python scripts/research_digest.py --days "$DAYS" > digest.md
+      - name: Open triage issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ ! -s digest.md ]; then echo "No new papers."; exit 0; fi
+          gh label create research --color 1D76DB --force >/dev/null
+          gh issue create --title "Research digest: week of $(date -u +%Y-%m-%d)" \
+            --label research --body-file digest.md

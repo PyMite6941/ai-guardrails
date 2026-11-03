@@ -6,26 +6,9 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends curl && \
     rm -rf /var/lib/apt/lists/*
 
-# Guardrail engine (stdlib only — no pip deps needed)
-COPY guardrail.py /app/guardrail.py
-COPY guardrail_server.py /app/guardrail_server.py
-COPY outer_monitor.py /app/outer_monitor.py
-COPY guardrail_auth.py /app/guardrail_auth.py
-COPY guardrail_logging.py /app/guardrail_logging.py
-COPY guardrail_modes.py /app/guardrail_modes.py
-COPY guardrail_risk.py /app/guardrail_risk.py
-COPY guardrail_integrity.py /app/guardrail_integrity.py
-COPY guardrail_testing.py /app/guardrail_testing.py
-COPY guardrail_classifier.py /app/guardrail_classifier.py
-COPY guardrail_step_monitor.py /app/guardrail_step_monitor.py
-COPY guardrail_policy_versioning.py /app/guardrail_policy_versioning.py
-COPY guardrail_human_loop.py /app/guardrail_human_loop.py
-COPY guardrail_canary.py /app/guardrail_canary.py
-COPY guardrail_prompt_injection.py /app/guardrail_prompt_injection.py
-COPY guardrail_leakage.py /app/guardrail_leakage.py
-COPY guardrail_hardware.py /app/guardrail_hardware.py
-COPY guardrail_updates.py /app/guardrail_updates.py
-COPY guardrail_rust_scanner.py /app/guardrail_rust_scanner.py
+# Guardrail engine (stdlib only — no pip deps needed). Copy every module by
+# glob so a newly added module can never be silently missing from the image.
+COPY guardrail*.py outer_monitor.py /app/
 COPY policies /app/policies
 COPY scripts /app/scripts
 COPY web /app/web
@@ -46,8 +29,14 @@ ENV OUTSIDE_MODEL_MODEL=qwen2.5:1.5b
 ENV OUTSIDE_MODEL_ENDPOINT=generate
 ENV OUTSIDE_MODEL_TIMEOUT=30
 
+# Run unprivileged: the code is read-only to the service user; only logs,
+# per-page policies and the agent tool workspace are writable.
+ENV GUARDRAIL_AGENT_WORKSPACE=/app/workspace
 RUN chmod +x /app/scripts/kill-switch.sh /app/tmux/guardrail-tmux.sh && \
-    mkdir -p /app/logs /app/policies/pages
+    mkdir -p /app/logs /app/policies/pages /app/workspace && \
+    useradd --system --uid 10001 --home-dir /app --shell /usr/sbin/nologin guardrail && \
+    chown -R guardrail:guardrail /app/logs /app/policies /app/workspace
+USER 10001:10001
 
 EXPOSE 8083
 
