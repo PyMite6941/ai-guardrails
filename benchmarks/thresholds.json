@@ -34,9 +34,9 @@
     }
   },
   "engine_input": {
-    "_note": "Default policy blocks generic terms (root, escape, bypass, curl, dig, 'pretend to be'). The keyword lists were silently unenforced before the fix in this release; trimming them is a policy decision. Ratchet this down as defaults are tuned.",
-    "min_detection_rate": 0.97,
-    "max_false_positive_rate": 0.19
+    "_note": "Full default input pipeline. Default policy phrases are attack-shaped since 1.1.0 (was 18.1% FP with bare words like root/escape/dig/nc).",
+    "min_detection_rate": 0.98,
+    "max_false_positive_rate": 0.02
   },
   "external": {
     "_note": "Holdout (test split) floors for benchmarks/external_eval.py --gate. Datasets are independently labelled; deepset counts topic-hijack and role-play requests as injection, which a context-free detector cannot see, hence its low TPR floor.",

@@ -536,7 +536,8 @@ python3 benchmarks/run_benchmark.py --show-misses  # list what got through
 |---|---|---|
 | prompt-injection layer, before this release | 30.5% | 22.9% |
 | prompt-injection layer, now | 98.9% | 0.0% |
-| full input pipeline (default policy) | 98.2% | 18.1% (generic default keywords: see thresholds note) |
+| full input pipeline, default policy 1.0 | 99.3% | 18.1% (bare words: root, escape, dig, nc, curl) |
+| full input pipeline, default policy 1.1 | 99.1% | 0.0% (attack-shaped phrases; 0 of 2,000 dolly instructions blocked) |
 
 Evasions now covered include spaced-out letters (`b-a-s-h`, 94%), filler words
 between trigger words, and Latin words inserted into non-Latin text. The
@@ -703,3 +704,12 @@ python3 guardrail_hardware.py   # prints env overrides for your device
 **License**
 
 MIT
+
+## Contributing
+
+`main` is protected by a repository ruleset: no direct pushes, force-pushes
+or deletion. Every change goes through a pull request that needs passing CI
+(tests on Python 3.9 and 3.13, Node, Docker, lint, the gated benchmarks,
+Bandit, secret scan, CodeQL) and an approving review from the code owner
+(`.github/CODEOWNERS`). New commits dismiss earlier approvals, and review
+threads must be resolved before merging.

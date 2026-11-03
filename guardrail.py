@@ -46,8 +46,10 @@ except Exception:  # pragma: no cover - fallback only
 
 try:  # noqa: E402
     from guardrail_leakage import scan_output as _leak_scan, LeakagePrevention
+    from guardrail_leakage import scan_input as _leak_scan_input
 except Exception:  # pragma: no cover - fallback only
     _leak_scan = None
+    _leak_scan_input = None
     LeakagePrevention = None  # type: ignore
 
 from guardrail_auth import (
@@ -87,36 +89,43 @@ def log(message: str, level: str = "INFO") -> None:
 
 # ── Default patterns (Clyde-style, safe defaults) ──────────────────────────
 
+# Policy phrases are matched literally (with homoglyph/leet folding and word
+# boundaries), without context. They must therefore be *attack-shaped*:
+# "curl http" rather than "curl", "root shell" rather than "root". Bare words
+# like root/escape/dig/nc/ping blocked "square root", "escape a maze",
+# "archaeologists dig" and "Charlotte, NC" (18% of benign prompts in the
+# benchmark). Semantic attacks (jailbreak personas, "pretend to be", system
+# prompt extraction) are handled in context by guardrail_prompt_injection,
+# which is far more precise than a keyword, so they are not repeated here.
 DEFAULT_BLOCKED_INPUT_PATTERNS = [
-    # Jailbreak / prompt injection
+    # Jailbreak / prompt injection (unambiguous phrases only)
     "ignore previous instructions", "disregard all prior", "system prompt leak",
-    "reveal your system prompt", "jailbreak", "dan mode", "developer mode",
-    "pretend to be", "you are now", "act as if", "roleplay as",
-    "forget your training", "unfiltered mode", "no restrictions", "bypass safety",
+    "reveal your system prompt", "dan mode", "forget your training",
+    "unfiltered mode", "bypass safety",
     # Container escape / infrastructure
-    "sudo", "rm -rf", "chmod 777", "curl | bash", "wget | bash",
+    "sudo", "rm -rf", "chmod 777", "curl | bash", "wget | bash", "| sh",
     "docker escape", "container escape", "privileged container", "host network",
     "pid=host", "ipc=host", "/proc/", "/sys/", "break out", "escape container",
-    "docker.sock", "kubectl", "namespace", "privilege escalation",
-    # Network access attempts
-    "wget", "curl", "ping", "nslookup", "dig", "telnet", "nc ", "netcat",
-    "ssh ", "scp ", "ftp ", "socket", "raw socket",
+    "docker.sock", "kubectl", "privilege escalation",
+    # Network tool *invocations*, not mentions of the tool
+    "curl http", "curl -", "wget http", "wget -", "nc -", "ncat -", "netcat",
+    "telnet ", "nslookup ", "dig @", "ping -c", "ssh -", "ssh root@", "scp -",
+    "ftp://", "raw socket", "/dev/tcp", "/dev/udp",
 ]
 
 DEFAULT_BLOCKED_INPUT_KEYWORDS = [
-    "root", "escape", "container breach", "docker.sock",
-    "privilege escalation", "jailbreak", "prompt injection",
-    "system prompt", "ignore instructions", "bypass", "unfiltered",
-    "no restrictions",
+    "root access", "root shell", "root privileges", "as root", "sandbox escape",
+    "escape the sandbox", "container breach", "docker.sock", "privilege escalation",
+    "ignore instructions", "bypass the guardrails", "bypass guardrails",
+    "bypass the filter", "bypass restrictions",
 ]
 
 DEFAULT_BLOCKED_OUTPUT_PATTERNS = [
     "ignore previous instructions", "disregard all prior", "system prompt leak",
     "reveal your system prompt", "jailbreak", "dan mode", "developer mode",
-    "pretend to be", "you are now", "act as if", "roleplay as",
-    "forget your training", "unfiltered mode", "no restrictions", "bypass safety",
-    "docker escape", "container breach", "container escape", "privileged",
-    "rm -rf /", "format disk", "delete all", "chmod -R", "iptables", "nftables",
+    "forget your training", "unfiltered mode", "bypass safety",
+    "docker escape", "container breach", "container escape", "privileged container",
+    "rm -rf /", "format disk", "delete all files", "chmod -R", "iptables", "nftables",
     "break out", "escape container", "mount namespace",
 ]
 
@@ -125,7 +134,8 @@ DEFAULT_BLOCKED_OUTPUT_KEYWORDS = [
 ]
 
 DEFAULT_HARMFUL_CONTENT_PATTERNS = [
-    "virus", "malware", "ransomware", "exploit code", "create a botnet",
+    "computer virus", "write a virus", "create a virus", "virus code",
+    "virus source code", "malware", "ransomware", "exploit code", "create a botnet",
     "ddos", "keylogger", "trojan", "spyware", "rootkit",
     "credential stealer", "password stealer", "data exfiltration",
     "reverse shell", "command injection", "sql injection",
@@ -160,6 +170,11 @@ ZERO_WIDTH_CHARS = [
     "\u200b", "\u200c", "\u200d", "\ufeff", "\u2060",
     "\u200e", "\u200f", "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",
 ]
+
+# Checks that describe what the *model* must not say. On input they only
+# match users talking about the topic ("what is a system prompt?"); extraction
+# attempts in input are caught in context by the prompt_injection check.
+OUTPUT_ONLY_CHECKS = {"disclaimers", "system_prompt_leakage"}
 
 DEFAULT_POLICY: Dict[str, Any] = {
     "name": "default",
@@ -548,6 +563,15 @@ class GuardrailEngine:
             return False, "", reason
         return True, text, "Leakage scan passed"
 
+    def _check_leakage_input(self, text: str, policy: GuardrailPolicy) -> Tuple[bool, str, str]:
+        """Leakage check for input: canaries, secrets, exfiltration URLs."""
+        if _leak_scan_input is None:
+            return False, "", "Leakage detector unavailable (fail-closed)"
+        safe, reason, _ = _leak_scan_input(text)
+        if not safe:
+            return False, "", reason
+        return True, text, "Leakage scan passed"
+
     def _check_container_breakout(self, text: str, policy: GuardrailPolicy) -> Tuple[bool, str, str]:
         """Detect attempts to break out of the container / reach the host.
 
@@ -581,16 +605,19 @@ class GuardrailEngine:
             "/dev/", "raw device", "block device", "mem ", "kmem", "/dev/mem",
             "/dev/kmsg", "dma", "iopl", "ioperm", "device access",
             # Cloud metadata / SSRF to orchestration
-            "169.254.169.254", "metadata", "aws metadata", "gcp metadata",
-            "azure metadata", "instance identity", "iam role", "security credentials",
-            "kubelet", "kubelet api", "etcd", "api server", "control plane",
+            "169.254.169.254", "metadata service", "metadata endpoint", "instance metadata",
+            "metadata.google.internal", "aws metadata", "gcp metadata", "azure metadata",
+            "instance identity", "iam role", "security credentials",
+            "kubelet", "kubelet api", "etcd", "kube-apiserver", "kubernetes api server",
+            "reach the control plane", "access the control plane",
             # D-Bus / systemd host reach
             "dbus", "systemd", "/run/dbus", "machine-id", "journalctl",
             # runc / container runtime exploits (classic + newer)
             "runc", "containerd", "containerd-shim", "shim escape", "runc escape",
             "cve-2019", "cve-2024", "cve-2025", "containerd escape",
             # General presence / persistence outside shell
-            "persistence", "maintain presence", "outside the shell", "outside container",
+            "establish persistence", "maintain persistence", "persistence mechanism",
+            "maintain presence", "outside the shell", "outside container",
             "escape this shell", "break out of this shell", "host filesystem",
             "reach the host", "reach host", "escape to host",
         ]
@@ -657,9 +684,11 @@ class GuardrailEngine:
         for check_name in checks:
             if not self._check_enabled(check_name):
                 continue
-            if check_name.startswith("output_") or check_name == "disclaimers":
+            if check_name.startswith("output_") or check_name in OUTPUT_ONLY_CHECKS:
                 continue  # output-only checks don't apply to input
             check = self.checks.get(check_name)
+            if check_name == "leakage":
+                check = self._check_leakage_input
             if not check:
                 continue
             safe, sanitized, reason = check(current, policy)
