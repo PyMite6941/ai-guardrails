@@ -1,5 +1,5 @@
 {
-  "name": "@pymite6941/ai-guardrails",
+  "name": "@ai-clyde/ai-guardrails",
   "version": "1.0.0",
   "description": "AI Guardrails — customizable per-web-page input/output guardrails for LLM apps. Clyde-inspired engine, web config UI, tmux + Docker manageable, npm publishable.",
   "main": "index.js",
