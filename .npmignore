@@ -1,0 +1,23 @@
+# Build artifacts
+rust/
+**/target/
+build/
+dist/
+*.spec
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.env
+.python-version
+# Logs & runtime
+logs/
+*.log
+npm-debug.log*
+# OS
+.DS_Store
+Thumbs.db
+# Node
+node_modules/
+package-lock.json

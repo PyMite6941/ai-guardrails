@@ -50,7 +50,6 @@
     "tests/test_auth.py",
     "tests/test_tool_calls.py",
     "tests/test_mcp_scanner.py",
-    "rust/",
     "scripts/install.sh",
     "scripts/run.sh",
     "scripts/stop.sh",
