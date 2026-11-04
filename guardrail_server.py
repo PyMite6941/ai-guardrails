@@ -35,7 +35,7 @@ import uuid
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 # Python.org builds on macOS ship without a CA bundle. curl reaches model
 # providers fine, but urllib then fails with CERTIFICATE_VERIFY_FAILED and the
@@ -67,6 +67,9 @@ from guardrail_models import (
 from guardrail_secret_stripper import strip_all_sensitive, count_secrets, detect_secrets
 from guardrail_token_compressor import compress_for_model, estimate_tokens
 from guardrail_assistant import get_assistant
+from guardrail_resource import ResourceGuard
+from guardrail_tool_calls import (ToolCallGuardrail, ToolSpec,
+                                  DEFAULT_TOOL_SPECS, DEFAULT_MAX_ARG_BYTES)
 from guardrail_auth import (
     authenticate, path_tier, send_json, send_auth_error,
     read_body_limited, create_session, validate_session, destroy_session,
@@ -156,6 +159,20 @@ canary = GuardrailCanary(engine=engine)
 risk_tracker = get_tracker()
 integrity_watcher = get_watcher()
 current_mode = load_mode()
+
+# Per-session resource budgets for agent tool calls (calls, bytes,
+# concurrency). Fail-closed: over-budget calls are rejected before anything
+# executes. Configured via GUARDRAIL_MAX_TOOL_CALLS_PER_SESSION,
+# GUARDRAIL_MAX_TOOL_ARG_BYTES_PER_SESSION, GUARDRAIL_MAX_CONCURRENT_TOOL_CALLS.
+resource_guard = ResourceGuard()
+
+# Agentic tool-call guardrail: registered allowlist, argument schema,
+# dangerous-argument scan, per-session budget and destructive-tool
+# confirmation — enforced before any tool runs.
+tool_guardrail = ToolCallGuardrail(engine=engine,
+                                   resource_guard=resource_guard)
+for _spec in DEFAULT_TOOL_SPECS:
+    tool_guardrail.register_tool(_spec)
 
 # ── Paths ──
 LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
@@ -377,16 +394,43 @@ def delete_chat_session(session_id: str) -> bool:
 
 
 def execute_agent_tool(tool_name: str, arguments: Dict[str, Any],
-                       session_token: Optional[str] = None) -> Dict[str, Any]:
+                       session_token: Optional[str] = None,
+                       session_id: str = "default",
+                       confirm: bool = False) -> Dict[str, Any]:
     """Execute an agent tool with guardrail validation.
 
-    Every tool call is validated through the guardrail engine before
-    execution. Returns the tool result or a blocked response.
+    Every tool call is validated through the tool-call guardrail (registered
+    allowlist, argument schema, dangerous-argument scan, per-session budget
+    and destructive-tool confirmation) before execution, then through the
+    input guardrail as defense-in-depth. Returns the tool result or a
+    blocked response.
     """
     if tool_name not in AGENT_TOOLS:
         return {"error": f"Unknown tool: {tool_name}"}
 
     args = arguments or {}
+    session_id = session_id or "default"
+
+    # ── Tool-call guardrail (fail-closed) ──
+    # Registered allowlist, argument schema, dangerous-argument scan,
+    # per-session call/byte budget and destructive-tool confirmation are all
+    # checked before anything executes.
+    verdict = tool_guardrail.validate_call(
+        tool_name, args, session_id=session_id, confirm=confirm)
+    if not verdict["safe"]:
+        return {
+            "blocked": True,
+            "reason": verdict["reason"],
+            "blocked_by": verdict["blocked_by"],
+            "tool": tool_name,
+            "sanitized_args": verdict.get("sanitized_args"),
+        }
+
+    # Concurrency budget for the execution itself.
+    ok, reason = resource_guard.begin_call(session_id)
+    if not ok:
+        return {"blocked": True, "reason": reason,
+                "blocked_by": "concurrency", "tool": tool_name}
 
     # ── Guardrail validation on tool arguments ──
     # Validate the tool name and key arguments through input guardrails
@@ -513,6 +557,8 @@ def execute_agent_tool(tool_name: str, arguments: Dict[str, Any],
 
     except Exception as e:
         return {"error": str(e)}
+    finally:
+        resource_guard.end_call(session_id)
 
     return {"error": f"Tool {tool_name} not implemented"}
 
@@ -633,7 +679,8 @@ def agentic_plan_and_act(user_text: str, session: ChatSession,
     # Step 3: Act — execute tool if selected
     tool_result: Optional[Dict[str, Any]] = None
     if tool_name != "none":
-        tool_result = execute_agent_tool(tool_name, tool_args, session_token)
+        tool_result = execute_agent_tool(tool_name, tool_args, session_token,
+                                         session_id=session.id)
         trace.append({"step": "act", "tool": tool_name, "result": tool_result})
 
         # Validate tool output if it contains text
@@ -838,7 +885,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/policies"):
             segments = [s for s in path.split("/") if s]
-            if len(segments) == 2:
+            if len(segments) == 3:
                 _json_response(self, 200, {
                     "pages": engine.list_pages(),
                     "default": engine.get_policy("default").to_dict(),
@@ -1031,6 +1078,37 @@ class Handler(BaseHTTPRequestHandler):
             assistant = get_assistant()
             _json_response(self, 200, assistant.get_policy(page_id), cors_headers)
             return
+        # ── Agent tool endpoints (GET) ────────────────────────
+        if path == "/api/tools":
+            _json_response(self, 200, {
+                "tools": tool_guardrail.list_tools(),
+                "stats": tool_guardrail.get_stats(),
+                "resource_stats": resource_guard.get_stats(),
+            }, cors_headers)
+            return
+        if path == "/api/tools/stats":
+            _json_response(self, 200, {
+                "tool_guardrail": tool_guardrail.get_stats(),
+                "resource_guard": resource_guard.get_stats(),
+            }, cors_headers)
+            return
+        if path == "/api/tools/budget":
+            params = parse_qs(urlparse(self.path).query)
+            session = (params.get("session", ["default"])[0] or "default")
+            _json_response(self, 200, resource_guard.status(session),
+                           cors_headers)
+            return
+        if path.startswith("/api/tools/"):
+            segments = [s for s in path.split("/") if s]
+            if len(segments) == 3:
+                name = segments[2]
+                spec = tool_guardrail.get_tool(name)
+                if spec is None:
+                    _json_response(self, 404,
+                                   {"error": "tool not found"}, cors_headers)
+                    return
+                _json_response(self, 200, spec.to_dict(), cors_headers)
+                return
         # ── Chat endpoints (GET) ───────────────────────────────────
         if path == "/api/chat/sessions":
             sessions = ChatSession.list_all()
@@ -1039,14 +1117,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/chat/tools":
             _json_response(self, 200, {
-                "tools": [
-                    {
-                        "name": name,
-                        "description": info["description"],
-                        "parameters": info["parameters"],
-                    }
-                    for name, info in AGENT_TOOLS.items()
-                ],
+                "tools": tool_guardrail.list_tools(),
             }, cors_headers)
             return
         if path.startswith("/api/chat/sessions/"):
@@ -1151,6 +1222,12 @@ class Handler(BaseHTTPRequestHandler):
             from guardrail_users import revoke_api_key
             out = revoke_api_key(segments[2])
             _json_response(self, 200 if out.get("ok") else 404, out,
+                           cors_headers, session_token=session_token)
+            return
+        if len(segments) == 3 and segments[1] == "tools":
+            removed = tool_guardrail.unregister_tool(segments[2])
+            _json_response(self, 200, {"ok": removed, "removed": removed,
+                                       "tool": segments[2]},
                            cors_headers, session_token=session_token)
             return
         _json_response(self, 404, {"error": "not found"}, cors_headers)
@@ -2089,6 +2166,68 @@ class Handler(BaseHTTPRequestHandler):
                                                   agent_name, page)
             _json_response(self, 200 if result["safe"] else 400, result,
                            cors_headers)
+            return
+        # ── Agent tool endpoints (POST) ───────────────────────
+        if path == "/api/tools/validate":
+            try:
+                body = json.loads(self._read_body() or b"{}")
+            except json.JSONDecodeError:
+                _json_response(self, 400, {"error": "invalid json"},
+                               cors_headers)
+                return
+            tool = body.get("tool", "")
+            args = body.get("args", {}) or {}
+            if not isinstance(args, dict):
+                _json_response(self, 400,
+                               {"error": "args must be a JSON object"},
+                               cors_headers)
+                return
+            session_id = body.get("session", "default") or "default"
+            confirm = body.get("confirm", False)
+            verdict = tool_guardrail.validate_call(tool, args,
+                                                   session_id=session_id,
+                                                   confirm=confirm)
+            _json_response(self, 200, verdict,
+                           cors_headers,
+                           session_token=result.session_token)
+            return
+        if path == "/api/tools/register":
+            try:
+                body = json.loads(self._read_body() or b"{}")
+            except json.JSONDecodeError:
+                _json_response(self, 400, {"error": "invalid json"},
+                               cors_headers)
+                return
+            name = body.get("name", "")
+            if not name:
+                _json_response(self, 400, {"error": "tool name is required"},
+                               cors_headers)
+                return
+            input_schema = body.get("input_schema")
+            if input_schema is None:
+                input_schema = body.get("parameters", {})
+            if not isinstance(input_schema, dict):
+                _json_response(self, 400,
+                               {"error": "input_schema must be a JSON object"},
+                               cors_headers)
+                return
+            destructive = bool(body.get("destructive", False))
+            spec = ToolSpec(
+                name=name,
+                description=body.get("description", ""),
+                input_schema=input_schema,
+                allowed=bool(body.get("allowed", True)),
+                destructive=destructive,
+                require_confirm=bool(
+                    body.get("require_confirm", destructive)),
+                allows_shell=bool(body.get("allows_shell", False)),
+                max_arg_bytes=int(body.get("max_arg_bytes",
+                                           DEFAULT_MAX_ARG_BYTES)),
+            )
+            tool_guardrail.register_tool(spec)
+            _json_response(self, 200, {"ok": True, "tool": spec.to_dict()},
+                           cors_headers,
+                           session_token=result.session_token)
             return
         _json_response(self, 404, {"error": "not found"}, cors_headers)
 

@@ -37,6 +37,9 @@ ai-guardrails-outer-monitor = "outer_monitor:main"
 ai-guardrails-logging = "guardrail_logging:main"
 ai-guardrails-updates = "guardrail_updates:main"
 ai-guardrails-hardware = "guardrail_hardware:main"
+ai-guardrails-resource = "guardrail_resource:main"
+ai-guardrails-tool-calls = "guardrail_tool_calls:main"
+ai-guardrails-mcp-scanner = "guardrail_mcp_scanner:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -52,3 +55,6 @@ target-version = ['py39']
 [tool.isort]
 profile = "black"
 line_length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

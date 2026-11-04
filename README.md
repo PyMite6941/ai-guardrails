@@ -464,7 +464,42 @@ monitoring, model providers, users, API keys, staged emergency override, dark/li
 through the same guardrail, with thought validation and file-change validation before
 anything executes.
 
-**Access control** — three roles enforced on the server, never by hiding buttons:
+**Agentic tool-call guardrails** — `guardrail_tool_calls.py` validates every agent tool
+call *before* it executes (fail-closed, default-deny):
+- Registered allowlist — unknown/unregistered tools cannot run.
+- Argument schema validation — required fields, types, min/max length, min/max numbers.
+- Dangerous-argument scan — command injection, shell escapes, container/host escape paths,
+  credentials, networking/firewall ops, destructive data ops; matched values are redacted.
+- Shell-execution argument names (`shell`, `command`, `exec`, ...) blocked unless the tool
+  explicitly declares `allows_shell`.
+- Destructive tools require an explicit `confirm: true`.
+- Per-session resource budgets via `guardrail_resource.py` — max calls, max argument bytes,
+  max concurrent calls; enforced before anything executes.
+
+Exposed over HTTP:
+- `GET /api/tools` — registered tools + guardrail and resource stats
+- `GET /api/tools/stats` — validation + budget counters
+- `GET /api/tools/budget?session=<id>` — per-session budget remaining
+- `GET /api/tools/<name>` — a single tool's spec
+- `POST /api/tools/validate` — validate a call before executing (`{tool, args, session, confirm}`)
+- `POST /api/tools/register` — register a new tool spec
+- `DELETE /api/tools/<name>` — unregister a tool
+
+All routes are in the default-deny route table in `guardrail_auth.py`, so a new endpoint
+cannot become world-readable by being forgotten.
+
+**MCP / agent tool supply-chain scanner** — `guardrail_mcp_scanner.py` scans Model Context
+Protocol (MCP) tool definitions before they are handed to an agent:
+- Tool-description injection: jailbreak / re-programming text smuggled into a description
+- Dangerous tool names shadowing system binaries (`rm`, `curl`, `shutdown`, ...)
+- Hidden imperative instruction language in descriptions
+- Dangerous schema parameters (`shell`, `command`, `exec`, ...)
+- Overly broad file-access path parameters
+- Exfiltration URLs in descriptions
+
+High-severity finding → recommended action `block`; medium → `review`; clean → `allow`.
+
+Access control — three roles enforced on the server, never by hiding buttons:
 
 | role | can |
 |---|---|
@@ -582,13 +617,17 @@ Key capabilities:
 - LLM-based classifier second opinion on Nebius Token Factory with NVIDIA Nemotron (wired in and validated against a mock endpoint; enable with GUARDRAIL_CLASSIFIER_ENABLED=1 and a Nebius key).
 - Tiered Nemotron use: Nano/Super for the per-request second opinion, Ultra for multi-turn forensic review.
 - Streaming reasoning-step monitor with interrupt on unsafe step.
+- Tool-call guardrails and MCP supply-chain scanner (added: `guardrail_tool_calls.py`, `guardrail_resource.py`, `guardrail_mcp_scanner.py`).
 - Additional per-page policies and model integrations.
 - Packaging as a pip-installable Python package alongside the npm package.
 ```
 
 **Built with**
 ```
-Python 3 (stdlib only), Rust (Aho-Corasick scanner), Docker, Node.js (npm client), tmux, shell scripts
+- Python 3 (stdlib only), Rust (Aho-Corasick scanner), Docker, Node.js (npm client), tmux, shell scripts
+- `guardrail_tool_calls.py` — agentic tool-call guardrails (allowlist, schema, dangerous args, confirmation)
+- `guardrail_resource.py` — per-session tool-call budgets (calls, bytes, concurrency)
+- `guardrail_mcp_scanner.py` — MCP / agent tool supply-chain scanner
 ```
 
 **Installation**

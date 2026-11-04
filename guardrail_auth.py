@@ -885,6 +885,15 @@ ROUTE_POLICY = [
     (r"^/api/monitor/validate/file_change$",     {"POST"}, "validate"),
     (r"^/api/monitor/(thought|action)$",         {"POST"}, "validate"),
 
+    # Agentic tool-call guardrail endpoints
+    (r"^/api/tools$",                            {"GET"},  "validate"),
+    (r"^/api/tools/stats$",                      {"GET"},  "monitor:read"),
+    (r"^/api/tools/budget$",                     {"GET"},  "monitor:read"),
+    (r"^/api/tools/validate$",                   {"POST"}, "validate"),
+    (r"^/api/tools/register$",                   {"POST"}, "policies:write"),
+    (r"^/api/tools/[^/]+$",                      {"GET"},  "validate"),
+    (r"^/api/tools/[^/]+$",                      {"DELETE"}, "policies:write"),
+
     # Read-only observability
     (r"^/api/stats$",                       {"GET"}, "monitor:read"),
     (r"^/api/guardrail-status$",            {"GET"}, "monitor:read"),
