@@ -894,6 +894,18 @@ ROUTE_POLICY = [
     (r"^/api/tools/[^/]+$",                      {"GET"},  "validate"),
     (r"^/api/tools/[^/]+$",                      {"DELETE"}, "policies:write"),
 
+    # MCP call guardrail endpoints
+    (r"^/api/mcp/servers$",                      {"GET"},  "validate"),
+    (r"^/api/mcp/stats$",                        {"GET"},  "monitor:read"),
+    (r"^/api/mcp/chain$",                        {"GET"},  "monitor:read"),
+    (r"^/api/mcp/servers/[^/]+$",                {"GET"},  "validate"),
+    (r"^/api/mcp/servers/[^/]+$",                {"DELETE"}, "policies:write"),
+    (r"^/api/mcp/validate/call$",                {"POST"}, "validate"),
+    (r"^/api/mcp/validate/result$",              {"POST"}, "validate"),
+    (r"^/api/mcp/register$",                     {"POST"}, "policies:write"),
+    (r"^/api/mcp/trust$",                        {"POST"}, "policies:write"),
+    (r"^/api/mcp/block$",                        {"POST"}, "policies:write"),
+
     # Read-only observability
     (r"^/api/stats$",                       {"GET"}, "monitor:read"),
     (r"^/api/guardrail-status$",            {"GET"}, "monitor:read"),

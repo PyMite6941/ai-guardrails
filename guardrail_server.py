@@ -70,6 +70,7 @@ from guardrail_assistant import get_assistant
 from guardrail_resource import ResourceGuard
 from guardrail_tool_calls import (ToolCallGuardrail, ToolSpec,
                                   DEFAULT_TOOL_SPECS, DEFAULT_MAX_ARG_BYTES)
+from guardrail_mcp_calls import MCPCallGuardrail
 from guardrail_auth import (
     authenticate, path_tier, send_json, send_auth_error,
     read_body_limited, create_session, validate_session, destroy_session,
@@ -173,6 +174,11 @@ tool_guardrail = ToolCallGuardrail(engine=engine,
                                    resource_guard=resource_guard)
 for _spec in DEFAULT_TOOL_SPECS:
     tool_guardrail.register_tool(_spec)
+
+# MCP call guardrail: validates outbound MCP tool calls before they reach
+# the server and tool results before they reach the agent. Per-server trust
+# tracking and budgets for supply-chain control.
+mcp_guardrail = MCPCallGuardrail(resource_guard=resource_guard)
 
 # ── Paths ──
 LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
@@ -1119,6 +1125,37 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 _json_response(self, 200, spec.to_dict(), cors_headers)
                 return
+        # ── MCP call guardrail endpoints (GET) ──────────────────────
+        if path == "/api/mcp/servers":
+            _json_response(self, 200, {
+                "servers": mcp_guardrail.list_servers(),
+                "stats": mcp_guardrail.get_stats(),
+            }, cors_headers)
+            return
+        if path == "/api/mcp/stats":
+            _json_response(self, 200, mcp_guardrail.get_stats(),
+                           cors_headers)
+            return
+        if path == "/api/mcp/chain":
+            params = parse_qs(urlparse(self.path).query)
+            session = (params.get("session", ["default"])[0] or "default")
+            _json_response(self, 200, {
+                "session": session,
+                "chain": mcp_guardrail.get_chain(session),
+            }, cors_headers)
+            return
+        if path.startswith("/api/mcp/servers/"):
+            segments = [s for s in path.split("/") if s]
+            if len(segments) == 3:
+                name = segments[2]
+                rec = mcp_guardrail.get_server(name)
+                if rec is None:
+                    _json_response(self, 404,
+                                   {"error": "server not found"},
+                                   cors_headers)
+                    return
+                _json_response(self, 200, rec.to_dict(), cors_headers)
+                return
         # ── Chat endpoints (GET) ───────────────────────────────────
         if path == "/api/chat/sessions":
             sessions = ChatSession.list_all()
@@ -1238,6 +1275,20 @@ class Handler(BaseHTTPRequestHandler):
             removed = tool_guardrail.unregister_tool(segments[2])
             _json_response(self, 200, {"ok": removed, "removed": removed,
                                        "tool": segments[2]},
+                           cors_headers, session_token=session_token)
+            return
+        if len(segments) == 4 and segments[1] == "mcp" and segments[2] == "servers":
+            name = segments[3]
+            rec = mcp_guardrail.get_server(name)
+            if rec is None:
+                _json_response(self, 404,
+                               {"error": "server not found"},
+                               cors_headers)
+                return
+            with mcp_guardrail._lock:
+                del mcp_guardrail._servers[name]
+            _json_response(self, 200, {"ok": True, "removed": True,
+                                       "server": name},
                            cors_headers, session_token=session_token)
             return
         _json_response(self, 404, {"error": "not found"}, cors_headers)
@@ -2237,6 +2288,102 @@ class Handler(BaseHTTPRequestHandler):
             tool_guardrail.register_tool(spec)
             _json_response(self, 200, {"ok": True, "tool": spec.to_dict()},
                            cors_headers,
+                           session_token=result.session_token)
+            return
+        # ── MCP call guardrail endpoints (POST) ─────────────────────
+        if path == "/api/mcp/validate/call":
+            try:
+                body = json.loads(self._read_body() or b"{}")
+            except json.JSONDecodeError:
+                _json_response(self, 400, {"error": "invalid json"},
+                               cors_headers)
+                return
+            server = body.get("server", "")
+            tool = body.get("tool", "")
+            args = body.get("args", {}) or {}
+            if not isinstance(args, dict):
+                _json_response(self, 400,
+                               {"error": "args must be a JSON object"},
+                               cors_headers)
+                return
+            session_id = body.get("session", "default") or "default"
+            verdict = mcp_guardrail.validate_call(server, tool, args,
+                                                  session_id=session_id)
+            _json_response(self, 200 if verdict["safe"] else 400, verdict,
+                           cors_headers,
+                           session_token=result.session_token)
+            return
+        if path == "/api/mcp/validate/result":
+            try:
+                body = json.loads(self._read_body() or b"{}")
+            except json.JSONDecodeError:
+                _json_response(self, 400, {"error": "invalid json"},
+                               cors_headers)
+                return
+            server = body.get("server", "")
+            tool = body.get("tool", "")
+            result_text = body.get("result", "")
+            session_id = body.get("session", "default") or "default"
+            verdict = mcp_guardrail.validate_result(server, tool, result_text,
+                                                    session_id=session_id)
+            _json_response(self, 200 if verdict["safe"] else 400, verdict,
+                           cors_headers,
+                           session_token=result.session_token)
+            return
+        if path == "/api/mcp/register":
+            try:
+                body = json.loads(self._read_body() or b"{}")
+            except json.JSONDecodeError:
+                _json_response(self, 400, {"error": "invalid json"},
+                               cors_headers)
+                return
+            name = body.get("name", "")
+            url = body.get("url", "")
+            trusted = bool(body.get("trusted", False))
+            if not name or not url:
+                _json_response(self, 400,
+                               {"error": "server name and url are required"},
+                               cors_headers)
+                return
+            rec = mcp_guardrail.register_server(name, url, trusted=trusted)
+            _json_response(self, 200, {"ok": True, "server": rec.to_dict()},
+                           cors_headers,
+                           session_token=result.session_token)
+            return
+        if path == "/api/mcp/trust":
+            try:
+                body = json.loads(self._read_body() or b"{}")
+            except json.JSONDecodeError:
+                _json_response(self, 400, {"error": "invalid json"},
+                               cors_headers)
+                return
+            name = body.get("name", "")
+            if not name:
+                _json_response(self, 400,
+                               {"error": "server name is required"},
+                               cors_headers)
+                return
+            ok = mcp_guardrail.trust_server(name)
+            _json_response(self, 200 if ok else 404,
+                           {"ok": ok, "server": name}, cors_headers,
+                           session_token=result.session_token)
+            return
+        if path == "/api/mcp/block":
+            try:
+                body = json.loads(self._read_body() or b"{}")
+            except json.JSONDecodeError:
+                _json_response(self, 400, {"error": "invalid json"},
+                               cors_headers)
+                return
+            name = body.get("name", "")
+            if not name:
+                _json_response(self, 400,
+                               {"error": "server name is required"},
+                               cors_headers)
+                return
+            ok = mcp_guardrail.block_server(name)
+            _json_response(self, 200 if ok else 404,
+                           {"ok": ok, "server": name}, cors_headers,
                            session_token=result.session_token)
             return
         _json_response(self, 404, {"error": "not found"}, cors_headers)

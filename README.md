@@ -514,6 +514,30 @@ server from injecting tools into the agent.
 - `scan_manifest(manifest)` — includes `server_trusted` and server trust status
   in the report
 
+**MCP call guardrails** — `guardrail_mcp_calls.py` validates MCP tool calls
+and results *at runtime* (agent <-> MCP server):
+- Server must be registered and trusted before any call is dispatched
+- Outbound call validation: argument schema, dangerous-argument scan, per-session
+  budget and concurrency, dangerous tool name blocking
+- Inbound result censorship: indirect prompt injection (a compromised MCP server
+  can't reprogram the agent through results), exfiltration URLs, dangerous content
+- Cross-tool call chaining tracked per session for multi-step attack detection
+- Per-server call tracking and block/untrust controls
+
+Exposed over HTTP:
+- `GET /api/mcp/servers` — registered servers + MCP guardrail stats
+- `GET /api/mcp/stats` — call/result validation counters
+- `GET /api/mcp/chain?session=<id>` — per-session tool call chain
+- `GET /api/mcp/servers/<name>` — a single server's record
+- `POST /api/mcp/validate/call` — validate a call before dispatching
+  (`{server, tool, args, session}`)
+- `POST /api/mcp/validate/result` — validate a result before returning to agent
+  (`{server, tool, result, session}`)
+- `POST /api/mcp/register` — register an MCP server
+- `POST /api/mcp/trust` — mark a server as trusted
+- `POST /api/mcp/block` — mark a server as blocked
+- `DELETE /api/mcp/servers/<name>` — unregister a server
+
 Access control — three roles enforced on the server, never by hiding buttons:
 
 | role | can |

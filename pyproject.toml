@@ -40,6 +40,7 @@ ai-guardrails-hardware = "guardrail_hardware:main"
 ai-guardrails-resource = "guardrail_resource:main"
 ai-guardrails-tool-calls = "guardrail_tool_calls:main"
 ai-guardrails-mcp-scanner = "guardrail_mcp_scanner:main"
+ai-guardrails-mcp-calls = "guardrail_mcp_calls:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
