@@ -488,6 +488,11 @@ Exposed over HTTP:
 All routes are in the default-deny route table in `guardrail_auth.py`, so a new endpoint
 cannot become world-readable by being forgotten.
 
+**Tool output censorship** — tool results are validated through the output
+guardrails before they reach the user. If a tool returns PII, exfiltration
+URLs, harmful content, or any other blocked output, the result is censored
+and the call is reported as blocked rather than returning the raw output.
+
 **MCP / agent tool supply-chain scanner** — `guardrail_mcp_scanner.py` scans Model Context
 Protocol (MCP) tool definitions before they are handed to an agent:
 - Tool-description injection: jailbreak / re-programming text smuggled into a description
@@ -498,6 +503,16 @@ Protocol (MCP) tool definitions before they are handed to an agent:
 - Exfiltration URLs in descriptions
 
 High-severity finding → recommended action `block`; medium → `review`; clean → `allow`.
+
+**MCP server trust allowlist** — `MCPToolScanner` tracks trusted / blocked MCP
+servers. When server trust enforcement is enabled (`set_enforce_server_trust`)
+and a server isn't in the trusted list, its manifest is rejected before any of
+its tools can be registered. This prevents an untrusted or compromised MCP
+server from injecting tools into the agent.
+- `trust_server(name)` — allow a server to supply tools
+- `untrust_server(name)` — block a server
+- `scan_manifest(manifest)` — includes `server_trusted` and server trust status
+  in the report
 
 Access control — three roles enforced on the server, never by hiding buttons:
 

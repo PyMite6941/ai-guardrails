@@ -76,6 +76,45 @@ class MCPToolScanner:
             "by_severity": {SEVERITY_HIGH: 0, SEVERITY_MEDIUM: 0,
                             SEVERITY_LOW: 0},
         }
+        # MCP server allowlist / denylist for supply-chain control.
+        # An empty trusted_servers means any server can be scanned (no
+        # server-level enforcement). Add server names to trusted_servers to
+        # restrict tool registration to known-good MCP servers.
+        self.trusted_servers: set = set()
+        self.blocked_servers: set = set()
+        self.enforce_server_trust: bool = False
+
+    def trust_server(self, server_name: str) -> None:
+        """Mark an MCP server as trusted (allowed to supply tools)."""
+        self.trusted_servers.add(server_name)
+        self.blocked_servers.discard(server_name)
+
+    def untrust_server(self, server_name: str) -> None:
+        """Mark an MCP server as blocked (never allowed to supply tools)."""
+        self.blocked_servers.add(server_name)
+        self.trusted_servers.discard(server_name)
+
+    def set_enforce_server_trust(self, enabled: bool = True) -> None:
+        """When enabled, tools from servers not in trusted_servers are
+        rejected unless explicitly allowlisted."""
+        self.enforce_server_trust = bool(enabled)
+
+    def is_server_trusted(self, server_name: str) -> bool:
+        """Return True if the server may supply tools."""
+        if server_name in self.blocked_servers:
+            return False
+        if not self.enforce_server_trust:
+            return True
+        if not self.trusted_servers:
+            return True  # no allowlist configured -> permit all
+        return server_name in self.trusted_servers
+
+    def server_trust_status(self) -> Dict[str, Any]:
+        return {
+            "enforce_server_trust": self.enforce_server_trust,
+            "trusted_servers": sorted(self.trusted_servers),
+            "blocked_servers": sorted(self.blocked_servers),
+        }
 
     # ── Single tool ─────────────────────────────────────────────────
 
@@ -230,9 +269,33 @@ class MCPToolScanner:
         """Scan an MCP server manifest (server info + tools list)."""
         tools = manifest.get("tools", []) if isinstance(manifest, dict) else []
         report = self.scan_tools(tools)
-        report["server"] = manifest.get("server", {}) \
-            if isinstance(manifest, dict) else {}
+        server = manifest.get("server", {}) if isinstance(manifest, dict) else {}
+        server_name = str(server.get("name", "")) if isinstance(server, dict) else ""
+
+        # Server-level trust check (agent supply-chain control).
+        server_trusted = self.is_server_trusted(server_name)
+        if not server_trusted:
+            report["safe"] = False
+            report["recommended_action"] = "block"
+            report.setdefault("findings", []).insert(0, {
+                "tool": server_name or "<unknown>",
+                "severity": SEVERITY_HIGH,
+                "type": "untrusted_mcp_server",
+                "description": (
+                    f"MCP server {server_name or 'unknown'} is not in the "
+                    f"trusted server allowlist and server trust enforcement "
+                    f"is enabled."),
+                "evidence": server_name or "",
+            })
+            report["by_severity"][SEVERITY_HIGH] = \
+                report.get("by_severity", {}).get(SEVERITY_HIGH, 0) + 1
+            report["summary"] = (f"{len(report.get('findings', []))} finding(s) "
+                                 f"across {self.stats['tools_scanned']} tool(s)")
+
+        report["server"] = server
         report["manifest_scanned"] = True
+        report["server_trusted"] = server_trusted
+        report["server_trust_status"] = self.server_trust_status()
         return report
 
 

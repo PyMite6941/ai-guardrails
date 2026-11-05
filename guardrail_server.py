@@ -693,7 +693,17 @@ def agentic_plan_and_act(user_text: str, session: ChatSession,
             trace.append({"step": "tool_output_validation",
                           "result": output_validation})
             if not output_validation["safe"]:
-                tool_result["blocked_by_tool_output"] = True
+                # Tool output failed output guardrails — censor it so nothing
+                # malicious (PII, exfiltration URLs, harmful content) reaches
+                # the user through a tool result. Falls through to the normal
+                # "blocked from using the tool" response path below.
+                tool_result = {
+                    "blocked": True,
+                    "reason": output_validation["reason"],
+                    "blocked_by": output_validation.get("blocked_by"),
+                    "censored": output_validation.get("censored", False),
+                    "sanitized": output_validation.get("sanitized_output", ""),
+                }
 
     # Step 4: Generate final response
     if tool_result and tool_result.get("blocked"):
