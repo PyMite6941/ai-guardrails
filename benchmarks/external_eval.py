@@ -137,6 +137,15 @@ def evaluate(name, det, show, split):
           f"TPR {res['tpr']:.1%}  FPR {res['fpr']:.1%}  precision {res['precision']:.1%}  "
           f"({dt:.1f}s)")
     print(f"   {NOTES[name]}")
+    if false_alarms and name == "wild_regular":
+        # Transparency: how many false alarms are explicit override boilerplate
+        # ("ignore all previous instructions ..."), which this detector flags by
+        # design because, for an injection guardrail, that is an override.
+        explicit = sum(1 for rid, _ in false_alarms if rid and rid.startswith("override."))
+        rest = len(false_alarms) - explicit
+        res["fpr_excluding_explicit_override"] = rest / max(fp + tn - explicit, 1)
+        print(f"   of {len(false_alarms)} false alarms, {explicit} are explicit instruction "
+              f"overrides; FPR on the rest {res['fpr_excluding_explicit_override']:.1%}")
     if split == "test" and show:
         print("   (misses are not shown for the test split: it is the holdout)")
         show = 0
@@ -173,6 +182,10 @@ def main():
             failed.append(f"{name}: TPR {res['tpr']:.1%} < {f['min_tpr']:.0%}")
         if res["split"] == "test" and res["fpr"] > f.get("max_fpr", 1):
             failed.append(f"{name}: FPR {res['fpr']:.1%} > {f['max_fpr']:.1%}")
+        excl = res.get("fpr_excluding_explicit_override")
+        if res["split"] == "test" and excl is not None and excl > f.get("max_fpr_excl_override", 1):
+            failed.append(f"{name}: FPR excluding explicit overrides {excl:.1%} > "
+                          f"{f['max_fpr_excl_override']:.1%}")
     for line in failed:
         print("GATE FAIL", line)
     return 1 if failed else 0

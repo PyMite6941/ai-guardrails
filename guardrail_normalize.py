@@ -212,7 +212,7 @@ def _letterlike_from_names() -> Dict[str, str]:
     """
     out: Dict[str, str] = {}
     pattern = re.compile(r"^LATIN (?:SMALL |CAPITAL )?LETTER (?:SMALL CAPITAL |TURNED |REVERSED |"
-                         r"SCRIPT |DOTLESS |CLOSED |OPEN |SIDEWAYS |INVERTED )*([A-Z])$")
+                         r"SCRIPT |DOTLESS |CLOSED |OPEN |SIDEWAYS |INVERTED |BARRED |STROKE )*([A-Z])$")
     for start, end in ((0x0180, 0x0250), (0x0250, 0x02B0), (0x1D00, 0x1D80), (0xA720, 0xA800),
                        (0x1DF00, 0x1E000)):
         for cp in range(start, end):
@@ -274,24 +274,33 @@ def _collapse_ws(text: str) -> str:
     return " ".join(text.split())
 
 
+# Letter forms whose NFKC decomposition inserts punctuation: parenthesized
+# "⒜" -> "(a)" would turn every letter into its own bracketed token. Map them
+# to the bare letter before NFKC (the meaning is unchanged).
+_PRE_NFKC = str.maketrans({chr(0x249C + i): chr(97 + i) for i in range(26)})
+
+
 def canonicalize(text: str) -> str:
     """Model-safe canonical form: invisibles stripped, NFKC, spaces collapsed."""
     if not text:
         return text or ""
-    text = strip_invisible(text)
+    text = strip_invisible(text).translate(_PRE_NFKC)
     text = unicodedata.normalize("NFKC", text)
     return _collapse_ws(text)
 
 
+
+
 def fold(text: str) -> str:
     """Lowercase, diacritic-free, homoglyph-folded form (detection only)."""
-    text = canonicalize(text).casefold()
+    text = canonicalize(text.translate(_PRE_NFKC)).casefold()
     text = _strip_marks(text)
     return text.translate(_CONFUSABLE_TABLE)
 
 
 def fold_lines(text: str) -> str:
     """Like fold() but keeps line breaks, for line-anchored syntax rules."""
+    text = text.translate(_PRE_NFKC)
     if not text:
         return ""
     text = unicodedata.normalize("NFKC", strip_invisible(text)).casefold()
@@ -437,7 +446,7 @@ def drop_foreign_words(text: str) -> str:
 
 def native_lower(text: str) -> str:
     """Canonical, lowercased, marks stripped, scripts left as they are."""
-    return _strip_marks(canonicalize(text)).lower()
+    return _strip_marks(canonicalize(text.translate(_PRE_NFKC))).lower()
 
 
 def detection_views(text: str) -> Dict[str, str]:

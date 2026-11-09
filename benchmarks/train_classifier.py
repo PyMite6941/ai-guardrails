@@ -50,10 +50,27 @@ def assemble(rng):
         (pos if label else neg).extend(texts)
         sources[src] = sources.get(src, 0) + len(texts)
 
+    from guardrail_prompt_injection import PromptInjectionDetector
+    det = PromptInjectionDetector()
+
+    def explicit_override(text):
+        # Label alignment: "regular" in the in-the-wild data means "not a
+        # harmful jailbreak", but many such prompts open with "ignore all
+        # previous instructions" (prompt-template boilerplate). For an
+        # injection detector that IS an override, so those rows are not
+        # taught as benign; they are left out rather than relabelled.
+        return any(f["severity"] == "critical" and f["category"] == "instruction_override"
+                   for f in det.analyze(text)["findings"])
+
     for name in EXTERNAL:
         rows = [r for r in external_eval.load(name) if r["split"] != "test"]
         add(1, [r["text"] for r in rows if r["attack"]], f"{name}:attack")
-        add(0, [r["text"] for r in rows if not r["attack"]], f"{name}:benign")
+        benign = [r["text"] for r in rows if not r["attack"]]
+        if name == "wild_regular":
+            kept = [t for t in benign if not explicit_override(t)]
+            sources["wild_regular:excluded_explicit_override"] = len(benign) - len(kept)
+            benign = kept
+        add(0, benign, f"{name}:benign")
 
     seeds = _jsonl("attacks.jsonl")
     add(1, [s["text"] for s in seeds], "corpus:attacks")
@@ -106,7 +123,12 @@ def main():
     print(f"threshold_high {t_high:.4f}  threshold_med {t_med:.4f}")
     print(f"train recall at high {sum(p >= t_high for p in train_pos) / len(train_pos):.1%}, "
           f"at med {sum(p >= t_med for p in train_pos) / len(train_pos):.1%}")
+    # Severity mapping chosen by a grid on train data (see module docstring of
+    # guardrail_textclf): the quantile thresholds above were too permissive on
+    # adversarially-phrased benign text and double-counted red-team scaffolding.
+    t_high, t_med, t_low = max(t_high, 0.97), max(t_med, 0.85), 0.75
     model.meta = {"threshold_high": round(t_high, 6), "threshold_med": round(t_med, 6),
+                  "threshold_low": t_low,
                   "target_fpr_high": TARGET_FPR_HIGH, "target_fpr_med": TARGET_FPR_MED,
                   "trained_on": sources, "epochs": args.epochs,
                   "trained": time.strftime("%Y-%m-%d"),

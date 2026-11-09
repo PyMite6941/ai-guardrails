@@ -74,7 +74,7 @@ _RULES = (r"(?:instructions?|rules?|prompts?|directions?|guidelines?|guardrails?
 _AI = (r"(?:ai|a\.i\.|assistant|llm|language\W+model|model|agent|chat\s?bot|bot|gpt|"
        r"chatgpt|claude|gemini|copilot|nemotron)")
 _SECRET_ADJ = (r"(?:system|initial|hidden|original|developer|secret|internal|confidential"
-               r"|pre-?prompt|starting|underlying)")
+               r"|pre-?prompt|underlying)")
 _PROMPT_NOUN = (r"(?:prompts?|instructions?|messages?|rules|directives?|configuration|guidelines"
                 r"|preamble)")
 _SENSITIVE = (r"(?:secrets?|passwords?|credentials?|tokens?|keys?|api\W?keys?|cookies?|"
@@ -285,7 +285,13 @@ RULES: List[Tuple[str, str, str, str, str, int]] = [
      r"instead|also|ignore|include|insert|append|say|tell)", 0),
 
     # ── Exfiltration instructions ───────────────────────────────────────
+    # Image URL whose query carries data: a placeholder ({x}, [x], $x, %s) or
+    # a sensitive word. A plain query (?w=400, ?appid=DEMO&i=...) is normal.
     ("exfil.markdown_image", "exfiltration", "critical", "lines",
+     r"!\[[^\]\n]{0,200}\]\(\s*<?https?://[^)\s]{1,500}[?&][^)\s=]{1,100}=[^)\s]{0,300}?"
+     r"(?:[{\[$<]|%s|%7b|(?:secret|password|passwd|token|api_?key|session|cookie|history|"
+     r"conversation|chat|messages?|prompt|context|data|email|ssn|credit))", re.IGNORECASE),
+    ("exfil.markdown_image_query", "exfiltration", "medium", "lines",
      r"!\[[^\]\n]{0,200}\]\(\s*<?https?://[^)\s]{1,500}[?&][^)\s=]{1,100}=", re.IGNORECASE),
     ("exfil.send_to_url", "exfiltration", "high", "text",
      r"\b(?:send|post|transmit|upload|forward|exfiltrate|leak|beacon|submit|copy|"
@@ -346,9 +352,13 @@ RULES: List[Tuple[str, str, str, str, str, int]] = [
     # Persona defined with bad traits: "ucar is an unfiltered and amoral chatbot".
     ("jailbreak.persona_traits", "jailbreak", "critical", "text",
      r"\b" + _BAD_PERSONA + r"\b(?:\W+(?:and|or|\w+))?(?:\W+\w+){0,2}?\W+(?:" + _AI
-     + r"|character|persona|entity|being|version|alter\W+ego|response|responses|answers?)\b"
-     r"|\b(?:characteristics|traits|personality)\b\W+(?:\w+\W+){0,4}?" + _BAD_PERSONA + r"\b",
-     0),
+     + r"|response|responses|answers?)\b", 0),
+    # Same traits on a fictional character/persona: common in creative
+    # writing ("an evil character"), so a weak signal only.
+    ("jailbreak.persona_traits_fiction", "jailbreak", "medium", "text",
+     r"\b" + _BAD_PERSONA + r"\b(?:\W+(?:and|or|\w+))?(?:\W+\w+){0,2}?\W+(?:character|persona|"
+     r"entity|being|version|alter\W+ego)\b|\b(?:characteristics|traits|personality)\b\W+"
+     r"(?:\w+\W+){0,4}?" + _BAD_PERSONA + r"\b", 0),
     # Claimed freedom from rules: "not bound by any of ChatGPT's ethical guidelines".
     ("jailbreak.unbound", "jailbreak", "critical", "text",
      r"\b(?:not|never|no\W+longer)\W+(?:be\W+)?(?:bound|restricted|limited|constrained|"
@@ -358,13 +368,16 @@ RULES: List[Tuple[str, str, str, str, str, int]] = [
      r"|\bfree(?:d|s)?\W+(?:itself|yourself|himself|herself|themselves\W+)?\W*(?:of|from)\W+"
      r"(?:all|any|your|its)\W+(?:\w+\W+)?(?:limitations|restrictions|rules|constraints|filters|"
      r"censorship|guidelines|boundaries|shackles|confines|chains|programming)"
-     r"|\b(?:does\W?n[o']?t|doesnt|do\W?n[o']?t|dont|will\W+not|won'?t|never)\W+(?:give\W+a\W+"
-     r"\w+|care|adhere|abide|follow|have)\W+(?:\w+\W+){0,2}?(?:ethic\w*|moral\w*|legal\w*|"
-     r"guidelines|rules|polic(?:y|ies)|restrictions|filters|limits)\b"
-     r"|\bno\W+(?:comprehension|concept|sense)\W+of\W+(?:morals|morality|ethics|legality)"
      r"|\bbreak(?:ing)?\W+all\W+(?:of\W+)?(?:the\W+)?(?:rules|guidelines|restrictions)\b"
      r"|\b(?:forget|ignore|disregard)\W+(?:\w+\W+){0,2}?(?:openai|chat\W?gpt|discord|anthropic)"
      r"'?s?\W+(?:\w+\W+){0,2}?(?:tos|terms|polic(?:y|ies)|guidelines|rules)\b", 0),
+    # A character who "does not care about morality" is ordinary fiction;
+    # the jailbreak form says it of the AI, which persona rules then add to.
+    ("jailbreak.amoral_description", "jailbreak", "medium", "text",
+     r"\b(?:does\W?n[o']?t|doesnt|do\W?n[o']?t|dont|will\W+not|won'?t|never)\W+(?:give\W+a\W+"
+     r"\w+|care|adhere|abide|follow|have)\W+(?:\w+\W+){0,2}?(?:ethic\w*|moral\w*|legal\w*|"
+     r"guidelines|rules|polic(?:y|ies)|restrictions|filters|limits)\b"
+     r"|\bno\W+(?:comprehension|concept|sense)\W+of\W+(?:morals|morality|ethics|legality)", 0),
     ("jailbreak.moralizing_rant", "jailbreak", "critical", "text",
      r"\bmoraliz\w*\W+rant\b(?:\W+\w+){0,6}?\W+(?:content\W+)?polic", 0),
     # Dual-response format (DAN family): "answer in two ways ... the second as X".
@@ -387,16 +400,16 @@ RULES: List[Tuple[str, str, str, str, str, int]] = [
      r"|\b(?:chat\W?gpt|gpt|assistant|ai)\W+(?:\w+\W+){0,2}?(?:you\W+are|your\W+name\W+is)\W+"
      r"(?:now|going\W+to\W+(?:be|become|act|pretend))\b"
      r"|\bpretend\W+to\W+be\W+(?:a\W+|an\W+)?(?:\w+\W+){0,2}?(?:character|ai|chatbot)\b", 0),
-    ("jailbreak.vendor_policy", "jailbreak", "medium", "text",
+    ("jailbreak.vendor_policy", "jailbreak", "low", "text",
      r"\b(?:openai|anthropic|chat\W?gpt|claude|gemini)'?s?\W+(?:\w+\W+)?(?:content\W+)?"
      r"(?:polic(?:y|ies)|guidelines|tos|terms\W+of\W+service|filters|restrictions)\b", 0),
-    ("jailbreak.named_persona", "jailbreak", "medium", "text",
+    ("jailbreak.named_persona", "jailbreak", "low", "text",
      r"\byou\W+(?:are|will\W+be|will\W+become|are\W+going\W+to\W+(?:be|become|pretend\W+to\W+be))"
      r"\W+(?:now\W+)?(?:called\W+|named\W+)?[a-z]+(?:gpt|ai|bot)\b(?<!\bchatgpt)", 0),
     ("jailbreak.answer_anything", "jailbreak", "high", "text",
      r"\b(?:will|must|always|can)\W+(?:actually\W+)?(?:answer|respond\W+to|fulfil+|comply\W+with)"
      r"\W+(?:any|every|all)\W+(?:\w+\W+)?(?:requests?|questions?|prompts?)\b(?:\W+\w+){0,3}?\W+"
-     r"(?:no\W+matter|regardless|without\W+(?:question|hesitation|refusal|exception|warning|"
+     r"(?:no\W+matter|regardless|without\W+(?:question|refusal|exception|warning|"
      r"censorship|restriction))", 0),
     # ── Red-team round 1 (benchmarks/redteam.py), by class ──────────────
     ("jailbreak.safety_disabled", "jailbreak", "critical", "text",
@@ -550,8 +563,8 @@ RULES: List[Tuple[str, str, str, str, str, int]] = [
      r"guidelines|filters|restrictions)"
      r"|\bnever\W+(?:been\W+)?given\W+any\W+(?:content\W+|safety\W+)?(?:rules|guidelines|"
      r"restrictions)"
-     r"|\b(?:unrestricted|unfiltered|uncensored|unaligned|jailbroken|evil|shadow|dark|true)\W+"
-     r"(?:self|side|alter\W+ego)\b"
+     r"|\b(?:unrestricted|unfiltered|uncensored|unaligned|jailbroken|unchained)\W+"
+     r"(?:self|alter\W+ego)\b"
      r"|\b(?:escaped|broken\W+free\W+(?:of|from)|freed\W+from)\W+(?:its|your|their|all)\W+"
      r"(?:guardrails|restrictions|rules|programming|chains|safeguards)"
      r"|\b(?:polic(?:y|ies)|rules|guidelines)\W+(?:permit|allow)\W+(?:anything|everything)"
@@ -618,6 +631,79 @@ RULES: List[Tuple[str, str, str, str, str, int]] = [
      r"\b(?:api\W+keys?|secrets?|tokens?|passwords?|credentials?|env(?:ironment)?\W+variables?)"
      r"\W+(?:from|in|stored\W+in)\W+your\W+(?:environment|env|config(?:uration)?|system|memory|"
      r"context|settings|secrets?)\b", 0),
+    # Secret disclosure: the deployment's own secret, whatever it is called.
+    ("extract.secret_disclosure", "prompt_extraction", "high", "text",
+     r"\b(?:reveal|include|print|say|tell|give|spell|output|write|provide|show|share|leak|disclose|"
+     r"contain|begin\W+with|start\W+with|end\W+with|replace|encode|hint|synonym\W+(?:to|for)|"
+     r"rhyme\W+with|recall|remember|repeat|type)\b(?:\W+\w+){0,6}?\W+(?:the\W+|your\W+|a\W+)?"
+     r"(?:secret\W+(?:password|passcode|passphrase|word|key|code|phrase|pin)|(?:your|the)\W+"
+     r"(?:secret|hidden)\W+\w+|your\W+(?:password|passcode|passphrase|pin|access\W+code)|"
+     r"(?:password|passcode|passphrase|secret)\W+(?:you\W+(?:were|have\W+been)\W+given|you\W+"
+     r"(?:know|have|are\W+(?:protecting|guarding|hiding|keeping)))|restricted\W+word)\b", 0),
+    ("extract.the_password", "prompt_extraction", "medium", "text",
+     r"\b(?:reveal|include|print|say|tell|give|spell|output|write|provide|show|share|leak|disclose|"
+     r"contain|begin\W+with|replace|encode)\b(?:\W+\w+){0,6}?\W+the\W+(?:password|passcode|"
+     r"passphrase)\b(?!\W+(?:policy|policies|requirements?|field|reset|manager|strength|rules|"
+     r"hash|prompt|form|box))", 0),
+    ("jailbreak.exception_notice", "jailbreak", "high", "text",
+     r"\b(?:exception|exempt\w*)\W+(?:to|from)\W+(?:the\W+)?(?:ai'?s?\W+|your\W+|its\W+)?(?:usual\W+)?"
+     r"(?:ethical\W+|safety\W+|security\W+|content\W+)?(?:protocols|rules|guidelines|polic(?:y|ies)|"
+     r"standards|restrictions|safeguards)\b"
+     r"|[\[(]\s*(?:system|developer|admin)\W+note\s*:", 0),
+    # ── Round 4: hidden instructions as the *topic* ─────────────────────
+    ("extract.hidden_instructions_topic", "prompt_extraction", "high", "text",
+     r"\b(?:first|last|opening|exact|actual|real|full|complete|entire|verbatim)\W+(?:\w+\W+){0,2}?"
+     r"(?:sentence|line|word|words|paragraph|text|version|copy|wording)?\W*(?:of\W+)?(?:your|its)\W+"
+     r"(?:\w+\W+)?(?:system\W+prompt|initial\W+prompt|instructions|setup|configuration|"
+     r"hidden\W+instructions|secret\W+instructions)\b"
+     r"|\b(?:about|regarding|guess(?:ing)?)\W+your\W+(?:hidden|secret|system|initial|internal|original)"
+     r"\W+(?:prompt|instructions|rules|guidelines|configuration)\b"
+     r"|\b(?:what|which\W+\w+)\W+(?:are|were|have)\W+you\W+(?:been\W+)?(?:secretly|privately|"
+     r"really|actually)?\W*(?:told|instructed|programmed|configured|forbidden)\W+(?:not\W+)?to\b"
+     r"|\bas\W+it\W+(?:appears|is\W+written|reads)\W+in\W+your\W+(?:setup|prompt|instructions|"
+     r"configuration|context|system\W+message)\b"
+     r"|\b(?:your|its)\W+(?:initial|system|original|hidden|full)\W+(?:prompt|instructions)\W*,?\W+"
+     r"(?:in|as|but)\W+(?:reverse|backwards?|base64|hex|json|pig\W+latin|morse|code|a\W+poem)"
+     r"|\b(?:output|print|give|show|list|share)\W+(?:me\W+)?your\W+rules\W+(?:in\W+full|verbatim|"
+     r"exactly|word\W+for\W+word|in\W+their\W+entirety)"
+     r"|\buse\W+your\W+(?:actual|real|own|exact)\W+(?:one|system\W+prompt|instructions|prompt)\b", 0),
+    # Bare override: "forget the constraints", "disregard the guidelines above".
+    # Not "the rules of chess" / "the instructions on the box".
+    ("override.bare_constraints", "instruction_override", "high", "text",
+     r"\b(?:forget|ignore|disregard|drop|ditch|discard|abandon|bypass|skip|lift)\W+(?:all\W+)?"
+     r"(?:the|your|any|these|those)\W+(?:\w+\W+)?(?:constraints|restrictions|filters|safeguards|"
+     r"guardrails|guidelines|safety\W+rules|content\W+rules)\b(?:\W+(?:above|below|earlier|before))?"
+     r"(?!\W+(?:of|for|on|in|about|to|from|at|regarding|around|that\W+apply\W+to)\b)"
+     r"|\b(?:disregard|ignore|forget)\W+(?:all\W+)?the\W+(?:rules|instructions|guidelines)\W+"
+     r"(?:above|below|before\W+this|earlier)\b", 0),
+    ("override.no_rules_given", "instruction_override", "high", "text",
+     r"\b(?:nobody|no\W+one|none)\W+(?:has\W+)?(?:told|given|instructed)\W+you\W+(?:any\W+)?"
+     r"(?:rules|instructions|guidelines|restrictions)\b"
+     r"|\bas\W+if\W+you\W+(?:had|have)\W+(?:no|zero)\W+(?:instructions|rules|guidelines|"
+     r"system\W+prompt|restrictions)\b", 0),
+    ("jailbreak.unlock", "jailbreak", "high", "text",
+     r"\bunlock\W+(?:\w+\W+)?(?:unrestricted|unfiltered|uncensored|full|developer|admin|god|hidden|"
+     r"secret)\W+(?:output|mode|access|answers|capabilities|responses)\b"
+     r"|\b(?:without|minus|with\W+no)\W+(?:your|its|the)\W+(?:usual\W+|normal\W+|standard\W+)?"
+     r"(?:filters|restrictions|rules|guidelines|censorship|content\W+filter)\b", 0),
+    ("jailbreak.claimed_identity", "jailbreak", "medium", "text",
+     r"\bauthori[sz]ation\W+code\b|\bi\W+am\W+(?:openai|anthropic|google|meta|microsoft)'?s?\W+"
+     r"(?:ceo|founder|developer|engineer|admin|staff|employee)\b|\b(?:the\W+)?admin\W+(?:wants|"
+     r"needs|requires|says|asked)\W+you\b", 0),
+    ("jailbreak.rulebreaking_twin", "jailbreak", "high", "text",
+     r"\b(?:the\W+)?other\W+(?:one\W+)?(?:\(?\w+\)?\W+)?(?:never|doesn'?t|does\W+not|won'?t)\W+"
+     r"(?:obeys?|follows?|has|care\W+about)\W+(?:any\W+)?(?:the\W+)?(?:rules|guidelines|restrictions|"
+     r"filters)?\b(?:\W+\w+){0,2}?\W*(?:does|goes\W+first)?"
+     r"|\b(?:act|respond|answer|operate)\W+as\W+two\W+(?:ais|assistants|personas|entities|bots|"
+     r"models|characters)\b", 0),
+    ("tool.sensitive_file", "tool_abuse", "high", "lines",
+     r"\b(?:cat|less|more|head|tail|type|print|read|open|dump)\s+(?:/etc/(?:passwd|shadow|sudoers)|"
+     r"~?/?\.ssh/(?:id_\w+|authorized_keys)|/proc/self/environ|\S*\.env\b|/root/)", re.I),
+    ("exfil.env_dump", "exfiltration", "high", "text",
+     r"\byou\W+(?:\w+\W+){0,3}?(?:print|dump|show|output|list|echo|reveal|send|share)\W+(?:me\W+)?"
+     r"(?:all\W+)?(?:the\W+|your\W+)?(?:env|environment)\W+(?:vars|variables)\b"
+     r"|\b(?:print|dump|show|output|list|echo|reveal)\W+(?:me\W+)?(?:all\W+)?(?:the\W+|your\W+)"
+     r"(?:env|environment)\W+(?:vars|variables)\W+(?:\w+\W+){0,3}?(?:do\W+it|now|immediately)\b", 0),
 ]
 
 # ── System prompt disclosure markers (model output side) ─────────────────
@@ -652,8 +738,122 @@ SECRET_PATTERNS = [
 # Risk scoring. critical/high findings block on their own; medium findings are
 # weak signals (role-play framing, "forget everything") that are common in
 # benign text and only block when two of them, or one plus anything else, fire.
+# ── Multilingual concept view ────────────────────────────────────────────
+# One rule per language does not scale (and word order differs: Hindi,
+# Turkish, Japanese put the verb last). Instead, words for a few concepts
+# are recognised in ~25 languages and an order-independent co-occurrence
+# check runs on them: IGNORE + INSTRUCTIONS + (PREVIOUS or ALL) is an
+# override; REVEAL + SYSTEM_PROMPT is an extraction attempt. Best-effort
+# lexicon; add languages here (entries are normalised like the input).
+_CONCEPT_LEXICON = {
+ "IGNORE": [
+  # hi, ur, bn, ta, mr
+  "अनदेखा", "नज़रअंदाज़", "नजरअंदाज", "भूल जाओ", "भूल जाएं", "نظرانداز", "উপেক্ষা", "புறக்கணி", "दुर्लक्ष",
+  # ar, fa, he
+  "تجاهل", "تجاهلي", "انس", "نادیده بگیر", "نادیده", "התעלם", "שכח",
+  # vi, id/ms, tl, th, sw
+  "bo qua", "phot lo", "quen", "abaikan", "lupakan", "huwag pansinin", "kalimutan", "เพิกเฉย", "ละเว้น", "ลืม",
+  "puuza", "sahau",
+  # european
+  "ignora", "ignoră", "ignoruj", "ignorera", "ignorer", "ohita", "unohda", "hagyd figyelmen kivul",
+  "αγνόησε", "αγνοήστε", "ігноруй", "ігноруйте", "zanemari", "ignoriraj", "negeer", "glem",
+  # cjk / tr / ru
+  "무시", "無視", "忽略", "忽視", "yok say", "gormezden gel", "игнорируй", "игнорировать", "забудь",
+ ],
+ "PREVIOUS": [
+  "पिछले", "पिछली", "पहले के", "سابقة", "السابقة", "السابق", "قبلی", "הקודמות", "הקודמות", "קודמות",
+  "truoc do", "truoc", "sebelumnya", "terdahulu", "nakaraan", "ก่อนหน้า", "yaliyotangulia", "iliyopita",
+  "zilizopita", "anterioare", "poprzednie", "tidigare", "forrige", "tidligere", "aiemmat", "edelliset",
+  "korabbi", "προηγούμενες", "попередні", "prethodne", "vorige", "이전", "以前", "之前", "先前", "onceki",
+  "предыдущие", "прежние",
+ ],
+ "ALL": ["सभी", "جميع", "كل", "همه", "כל", "tat ca", "semua", "lahat", "ทั้งหมด", "yote", "zote",
+         "toate", "wszystkie", "alla", "alle", "kaikki", "minden", "όλες", "всі", "sve", "모든", "모두", "すべて",
+         "所有", "tum", "все"],
+ "INSTRUCTIONS": [
+  "निर्देश", "निर्देशों", "हिदायत", "ہدایات", "নির্দেশ", "அறிவுறுத்தல்", "التعليمات", "تعليمات", "الأوامر",
+  "دستورالعمل", "دستورات", "ההוראות", "הוראות", "huong dan", "chi dan", "lenh", "instruksi", "petunjuk",
+  "perintah", "tagubilin", "คำสั่ง", "maagizo", "maelekezo", "amri", "instructiunile", "instrukcje",
+  "instruktionerna", "instruktioner", "instruksjoner", "ohjeet", "utasitasokat", "οδηγίες", "інструкції",
+  "upute", "instructies", "지시", "지침", "指示", "指令", "talimat", "инструкции", "указания",
+ ],
+ "SYSTEM_PROMPT": ["सिस्टम प्रॉम्प्ट", "موجه النظام", "تعليمات النظام", "loi nhac he thong", "prompt sistem",
+                   "maelekezo yako ya mfumo", "maelekezo ya mfumo", "พรอมต์ระบบ", "systemprompt",
+                   "시스템 프롬프트", "系统提示", "システムプロンプト", "системный промпт", "sistem istemi"],
+ "REVEAL": ["दिखाएं", "दिखाओ", "बताओ", "اكشف", "أظهر", "اعرض", "نشان بده", "הצג", "cho toi xem", "hien thi",
+            "tunjukkan", "perlihatkan", "ipakita", "แสดง", "nionyeshe", "unionyeshe", "onyesha", "arata",
+            "pokaz", "visa", "vis", "nayta", "mutasd", "δείξε", "покажи", "보여", "显示", "表示", "goster"],
+}
+_CONCEPT_WINDOW = 200
+
+
+def _compile_concepts():
+    out = []
+    for concept, words in _CONCEPT_LEXICON.items():
+        forms = sorted({native_lower(w) for w in words}, key=len, reverse=True)
+        latin = [re.escape(f) for f in forms if re.fullmatch(r"[a-z ]+", f)]
+        other = [re.escape(f) for f in forms if not re.fullmatch(r"[a-z ]+", f)]
+        parts = []
+        if latin:
+            parts.append(r"\b(?:" + "|".join(latin) + r")\b")
+        if other:
+            parts.append("(?:" + "|".join(other) + ")")
+        out.append((concept, re.compile("|".join(parts))))
+    return out
+
+
+_COMPILED_CONCEPTS: List[Tuple[str, Any]] = []
+
+
+def _concepts():
+    if not _COMPILED_CONCEPTS:
+        _COMPILED_CONCEPTS.extend(_compile_concepts())
+    return _COMPILED_CONCEPTS
+
+
+def concept_findings(text: str) -> List[Dict[str, Any]]:
+    """Order-independent multilingual override / extraction detection."""
+    view = native_lower(text[:STRUCTURAL_MAX_CHARS])
+    hits = []
+    for concept, rx in _concepts():
+        hits += [(m.start(), concept) for m in rx.finditer(view)]
+    hits.sort()
+    found: List[Dict[str, Any]] = []
+    for i, (pos, _) in enumerate(hits):
+        window = {c for p, c in hits[i:] if p - pos <= _CONCEPT_WINDOW}
+        if "IGNORE" in window and "INSTRUCTIONS" in window and window & {"PREVIOUS", "ALL"} \
+                and not any(f["rule"] == "override.multilingual_concept" for f in found):
+            found.append({"rule": "override.multilingual_concept", "category": "instruction_override",
+                          "severity": "critical", "match": view[pos:pos + 80]})
+        if "REVEAL" in window and "SYSTEM_PROMPT" in window \
+                and not any(f["rule"] == "extract.multilingual_concept" for f in found):
+            found.append({"rule": "extract.multilingual_concept", "category": "prompt_extraction",
+                          "severity": "high", "match": view[pos:pos + 80]})
+    return found
+
+
+# A negation that directly governs the extraction verb: "never reveal",
+# "do not show", "must not repeat". Only immediately before the match, so
+# "do not hesitate to reveal ..." is still an extraction attempt.
+_NEGATED_BEFORE = re.compile(
+    r"\b(?:never|(?:do|does|did|must|should|shall|will|can|may)\W*n[o']?t|don'?t|doesn'?t|"
+    r"won'?t|can'?t|refuse\W+to|avoid|under\W+no\W+circumstances(?:\W+\w+)?)\W+(?:ever\W+)?$")
+
+_NEGATED_SQUASHED = re.compile(
+    r"(?:never|donot|dont|doesnot|doesnt|mustnot|mustnt|shouldnot|shouldnt|wont|willnot|"
+    r"cannot|cant|refuseto|avoid)(?:ever)?$")
+
 SEVERITY_WEIGHT = {"critical": 1.0, "high": 1.0, "medium": 0.5, "low": 0.25}
 BLOCK_SCORE = 1.0
+# Correlated weak signals describe the same thing (a fictional character's
+# traits, a persona set-up) and must not add up to a block on their own: a
+# group contributes only its strongest finding.
+SIGNAL_GROUP = {
+    "jailbreak.persona_traits_fiction": "character_description",
+    "jailbreak.amoral_description": "character_description",
+    "jailbreak.persona_switch": "persona_setup",
+    "jailbreak.named_persona": "persona_setup",
+}
 
 _COMPILED_RULES = [
     (rid, cat, sev, kind, re.compile(pat, flags))
@@ -995,7 +1195,8 @@ class PromptInjectionDetector:
             despaced = despace(visible)
             skeleton_sources.add(despaced)
             sources += [despaced, drop_filler(visible), drop_filler(despaced),
-                        drop_foreign_words(visible), upside_down(visible)]
+                        drop_foreign_words(visible), upside_down(visible),
+                        upside_down(despaced)]
         sources = list(dict.fromkeys(s for s in sources if s))
 
         views: Dict[str, List[str]] = {"text": [], "native": [], "lines": [base], "squashed": []}
@@ -1022,13 +1223,20 @@ class PromptInjectionDetector:
         if not text:
             return {"safe": True, "findings": findings}
         views = self._views(text)
+        negated_extraction = False
         for rid, cat, sev, kind, rx in _COMPILED_RULES:
             for view in views[kind]:
                 m = rx.search(view)
+                if m and cat == "prompt_extraction" and (
+                        _NEGATED_SQUASHED if kind == "squashed" else _NEGATED_BEFORE).search(
+                        view, max(0, m.start() - 40), m.start()):
+                    negated_extraction = True
+                    continue  # "never reveal your system prompt" is a defence
                 if m:
                     findings.append({"rule": rid, "category": cat, "severity": sev,
                                      "match": m.group(0)[:120]})
                     break
+        findings += concept_findings(text)
         if include_leakage:
             for rx in _COMPILED_LEAKAGE:
                 if any(rx.search(v) for v in views["text"]):
@@ -1049,12 +1257,21 @@ class PromptInjectionDetector:
         if clf is not None:
             prob = max(clf.prob(src) for src in views["_sources"])
             sev = ("high" if prob >= clf.threshold_high else
-                   "medium" if prob >= clf.threshold_med else None)
+                   "medium" if prob >= clf.threshold_med else
+                   "low" if prob >= clf.threshold_low else None)
+            if sev and negated_extraction:
+                # n-gram features cannot see negation; the rules saw the
+                # extraction phrase explicitly negated, so trust it less.
+                sev = {"high": "medium", "medium": "low", "low": None}[sev]
             if sev:
                 findings.append({"rule": "ml.textclf", "category": "classifier",
                                  "severity": sev, "match": f"p={prob:.3f}"})
         findings.sort(key=lambda f: -SEVERITY_WEIGHT.get(f["severity"], 1.0))
-        score = sum(SEVERITY_WEIGHT.get(f["severity"], 1.0) for f in findings)
+        groups: Dict[str, float] = {}
+        for f in findings:
+            key = SIGNAL_GROUP.get(f["rule"], f["rule"])
+            groups[key] = max(groups.get(key, 0.0), SEVERITY_WEIGHT.get(f["severity"], 1.0))
+        score = sum(groups.values())
         return {"safe": score < BLOCK_SCORE, "score": round(score, 2), "findings": findings}
 
     def scan(self, text: str) -> Tuple[bool, str, Optional[str]]:

@@ -15,8 +15,11 @@
 #
 # The classifier is one signal in the detector's risk score, not a verdict:
 #   p >= threshold_high  -> "high" finding   (blocks on its own)
-#   p >= threshold_med   -> "medium" finding (blocks with any other signal)
-# Thresholds are calibrated on benign training data for a target FPR.
+#   p >= threshold_med   -> "medium" finding (blocks with one more weak signal)
+#   p >= threshold_low   -> "low" finding    (tips an already-suspicious input)
+# Thresholds are chosen on TRAIN splits only (benchmarks/train_classifier.py
+# grid: catch rate on attack train splits vs false positives on benign train
+# sets, including the red-team wrappers the classifier itself learned).
 #=============================================================================
 
 import array
@@ -68,8 +71,9 @@ class TextClassifier:
         self.w = weights
         self.b = bias
         self.meta = meta
-        self.threshold_high = float(meta.get("threshold_high", 0.95))
-        self.threshold_med = float(meta.get("threshold_med", 0.8))
+        self.threshold_high = float(meta.get("threshold_high", 0.97))
+        self.threshold_med = float(meta.get("threshold_med", 0.85))
+        self.threshold_low = float(meta.get("threshold_low", 0.75))
 
     def prob(self, text: str) -> float:
         if not text or not text.strip():

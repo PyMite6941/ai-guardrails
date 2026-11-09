@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && \
 
 # Guardrail engine (stdlib only — no pip deps needed). Copy every module by
 # glob so a newly added module can never be silently missing from the image.
-COPY guardrail*.py outer_monitor.py /app/
+COPY guardrail*.py outer_monitor.py guardrail_textclf_model.json /app/
 COPY policies /app/policies
 COPY scripts /app/scripts
 COPY web /app/web

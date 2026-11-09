@@ -34,10 +34,53 @@ are weak signals and block only in combination. That is what lets the
 detector count role-play jailbreak scaffolding without blocking ordinary
 role-play requests.
 
-Detection is measured twice: `benchmarks/run_benchmark.py` (in-repo corpus x
-17 evasion mutators) and `benchmarks/external_eval.py` (public, independently
-labelled datasets; the test splits are a holdout). Both are gated in CI. See
-the README for current numbers and their caveats.
+Further views added from red-team rounds: a **skeleton** view (keeps the
+rules' own vocabulary and drops short runs of unknown words, so inserted
+nonsense words do not break phrase rules); decoders for **Morse, binary,
+Atbash and Caesar** (brute force per sentence, kept only when the result
+reads more like language), **string-literal concatenation** (payload
+splitting), **upside-down** text, and letter-likes generated from Unicode
+names (**small caps, turned/reversed letters, regional-indicator letters,
+parenthesized letters**). A **multilingual concept view** recognises
+ignore / previous / all / instructions / system prompt / reveal in ~25
+languages and checks their co-occurrence independent of word order.
+
+Rules are written against *concepts*, not phrasings, where possible:
+extraction is "the object is the assistant's own instructions" whatever the
+verb (quote, summarise, translate, encode, write a poem from); override is
+"those instructions declared void, outdated or revoked". Negation that
+directly governs an extraction verb ("never reveal your system prompt") is a
+defence, not an attack.
+
+**Learned layer.** `guardrail_textclf.py` is a stdlib-only logistic
+regression over hashed word and character n-grams of the folded text,
+trained by `benchmarks/train_classifier.py` on train splits only. It
+generalises over paraphrase where rules cannot; it cannot see negation or
+context, so it is one weighted signal (high >= 0.97, medium >= 0.85, low >=
+0.75, thresholds chosen on train data), never a verdict by itself unless very
+confident. The model file is in the integrity watchlist.
+
+**Scoring.** critical/high = 1.0, medium = 0.5, low = 0.25; correlated weak
+signals share a group and count once; block at 1.0. Jailbreak scaffolding
+(prefix injection, refusal suppression, authority claims, fake reasoning,
+fake tool output, many-shot turns, fiction escape) is medium: it blocks with
+a payload, not on its own.
+
+Detection is measured four ways, all gated in CI: `run_benchmark.py`
+(in-repo corpus x 19 evasion mutators), `redteam.py` (adaptive attacker: 17
+published jailbreak techniques x intents x stacked evasions, plus benign
+payloads through the same wrappers), `external_eval.py` (seven public,
+independently labelled datasets; test splits are the holdout), and the
+benign corpora. See the README for current numbers and their caveats.
+
+**Limits, stated plainly.** Every round of hand-written attacks in new
+styles found misses the previous rounds had not (5/30, then 11/30 before
+the fixes for those classes). Pattern rules and an n-gram classifier can
+always be paraphrased around by a determined, adaptive attacker. Treat this
+layer as a fast, cheap filter that removes the bulk of known techniques, and
+keep least-privilege tools, the model-based classifier
+(`guardrail_classifier.py`), output-side leakage checks and the outer
+monitor enabled behind it.
 
 Rules (`guardrail_prompt_injection.py`) are grouped by OWASP LLM01/LLM07
 category, use word boundaries and bounded gaps instead of substrings, and are
