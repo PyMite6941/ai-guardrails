@@ -65,6 +65,7 @@ def random_case(text: str, rng: random.Random) -> str:
 
 def tag_smuggle(text: str, rng: random.Random) -> str:
     text = "".join(c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c))
+    text = " ".join(text.split())  # an attacker encodes line breaks as spaces
     hidden = "".join(chr(0xE0000 + ord(c)) for c in text if 0x20 <= ord(c) <= 0x7E)
     return "Please summarize this note." + hidden
 
@@ -103,6 +104,38 @@ def filler_words(text: str, rng: random.Random) -> str:
         if rng.random() < 0.25:
             out.append(rng.choice(FILLER))
     return " ".join(out)
+
+
+def _small_caps_table():
+    table = {}
+    for cp in list(range(0x1D00, 0x1D2C)) + [0x0262, 0x026A, 0x0274, 0x0280, 0x028F, 0x029F,
+                                              0x0299, 0x029C, 0xA730, 0xA731, 0x01EB]:
+        name = unicodedata.name(chr(cp), "")
+        if name.startswith("LATIN LETTER SMALL CAPITAL ") and len(name.split()[-1]) == 1:
+            table.setdefault(name.split()[-1].lower(), chr(cp))
+    return table
+
+
+_SMALL_CAPS = _small_caps_table()
+_UPSIDE = dict(zip("abcdefghijklmnopqrstuvwxyz", "ɐqɔpǝɟƃɥᴉɾʞlɯuodbɹsʇnʌʍxʎz"))
+
+
+def font_styles(text: str, rng: random.Random) -> str:
+    """"Fancy font" generators: small caps, regional-indicator letters,
+    upside-down, parenthesized, circled, superscript, math bold, squared."""
+    style = rng.choice(["small_caps", "regional", "upside_down", "parenthesized", "circled",
+                        "math_bold", "squared"])
+    low = text.lower()
+    if style == "small_caps":
+        return "".join(_SMALL_CAPS.get(c, c) for c in low)
+    if style == "regional":
+        return " ".join("".join(chr(0x1F1E6 + ord(c) - 97) if "a" <= c <= "z" else c for c in w)
+                        for w in low.split())
+    if style == "upside_down":
+        return "".join(_UPSIDE.get(c, c) for c in low)[::-1]
+    base = {"parenthesized": 0x249C, "circled": 0x24D0, "math_bold": 0x1D41A,
+            "squared": 0x1F130}[style]
+    return "".join(chr(base + ord(c) - 97) if "a" <= c <= "z" else c for c in low)
 
 
 # Words NOT in guardrail_normalize.FILLER_WORDS: nouns, verbs and nonsense.
@@ -146,8 +179,10 @@ MUTATORS: Dict[str, Callable[[str, random.Random], str]] = {
     "reversed": reversed_text,
     "filler_words": filler_words,
     "filler_novel": filler_novel,
+    "font_styles": font_styles,
     "stacked": stacked,
 }
 
 # Mutators that only make sense for ASCII-script attacks.
-LATIN_ONLY = {"homoglyph", "leetspeak", "spacing", "fullwidth", "tag_smuggle", "rot13"}
+LATIN_ONLY = {"homoglyph", "leetspeak", "spacing", "fullwidth", "tag_smuggle", "rot13",
+              "font_styles"}

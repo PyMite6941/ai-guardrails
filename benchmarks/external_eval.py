@@ -42,30 +42,49 @@ DATASETS = {
     # Benign only: real human-written instructions, the false-positive check.
     "dolly": ("databricks/databricks-dolly-15k", ["train"], "instruction",
               lambda r: False),
+    # Real people attacking Lakera's Gandalf game to make it leak a password:
+    # adaptive human override / extraction attempts. All rows are attacks.
+    "gandalf": ("Lakera/gandalf_ignore_instructions", ["train", "validation", "test"], "text",
+                lambda r: True),
+    # Injections hidden inside text the model was asked to summarize (indirect).
+    "gandalf_summ": ("Lakera/gandalf_summarization", ["train", "validation", "test"], "text",
+                     lambda r: True),
+    # Jailbreaks collected in the wild (Discord, Reddit, websites; Shen et al., CCS 2024).
+    "wild_jailbreak": ("TrustAIRLab/in-the-wild-jailbreak-prompts@jailbreak_2023_12_25",
+                       ["train"], "prompt", lambda r: True),
+    # Ordinary prompts from the same communities: the hardest realistic FP test
+    # (persona and prompt-engineering requests that are not jailbreaks).
+    "wild_regular": ("TrustAIRLab/in-the-wild-jailbreak-prompts@regular_2023_12_25",
+                     ["train"], "prompt", lambda r: False),
 }
-MAX_ROWS = {"dolly": 2000}
+MAX_ROWS = {"dolly": 2000, "wild_regular": 3000}
 # Datasets with a single split: alternate rows into pseudo train/test halves.
-PSEUDO_SPLIT = {"dolly"}
+PSEUDO_SPLIT = {"dolly", "wild_jailbreak", "wild_regular"}
 NOTES = {
     "deepset": "Apache-2.0. Labels are broad: role-play requests and some plain tasks "
                "('Generate SQL code') are labelled injection; ~half the rows are German.",
     "jackhhao": "Apache-2.0. Jailbreak vs benign prompts, many long role-play jailbreaks.",
     "dolly": "CC-BY-SA-3.0. First 2000 human-written instructions; all benign (FPR only).",
+    "gandalf": "MIT. Real human attempts to make Gandalf ignore instructions / leak a password.",
+    "gandalf_summ": "MIT. Injections embedded in text given to a summarizer (indirect).",
+    "wild_jailbreak": "MIT. In-the-wild jailbreak prompts (Shen et al., CCS 2024).",
+    "wild_regular": "MIT. First 3000 regular prompts from the same communities (FPR only).",
 }
 
 
 def fetch(dataset, split, max_rows=None):
     rows, offset = [], 0
+    dataset, _, config = dataset.partition("@")
     while True:
-        q = urllib.parse.urlencode({"dataset": dataset, "config": "default", "split": split,
+        q = urllib.parse.urlencode({"dataset": dataset, "config": config or "default", "split": split,
                                     "offset": offset, "length": 100})
-        for attempt in range(4):
+        for attempt in range(6):
             try:
                 with urlopen_http(f"{API}?{q}", timeout=60) as resp:
                     page = json.loads(resp.read())
                 break
             except Exception:
-                if attempt == 3:
+                if attempt == 5:
                     raise
                 time.sleep(2 ** attempt)
         batch = [r["row"] for r in page.get("rows", [])]

@@ -59,7 +59,9 @@ def _detectors():
 
 def run(seeds, show_misses=False):
     attacks = _load("attacks.jsonl")
-    benign = _load("benign.jsonl")
+    # benign_hard: realistic look-alikes (contracts, agent traces, transcripts, code,
+    # puzzles, people discussing attacks) that rules must not fire on.
+    benign = _load("benign.jsonl") + _load("benign_hard.jsonl")
     detectors = _detectors()
     report = {}
     for name, blocked in detectors.items():
