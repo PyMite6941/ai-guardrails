@@ -327,7 +327,7 @@ def squash(text: str) -> str:
 _SEPARATORS = frozenset(".-_·•*~+|/\\")
 # Any one repeated non-word, non-space character can separate letters:
 # "b-a-s-h", "c🙂a🙂l🙂l", "r♦u♦n".
-_SEP_TOKEN = re.compile(r"(?<!\S)(\S)((?:(?:[^\w\s]|_)\S){1,})(?=\s|$)")
+_SEP_TOKEN = re.compile(r"(?<!\S)(\S)((?:(?:[^\w\s]|_)\S){1,150})(?=\s|$)")  # bounded: no ReDoS
 
 # Words that carry no instruction content: intensifiers, hedges, politeness
 # and discourse markers. Deliberately broad and generic rather than tuned to

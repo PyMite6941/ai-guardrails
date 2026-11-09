@@ -286,6 +286,10 @@ adversarial = [
     "​" * 50000,
     "<|" * 20000,
     "![" * 10000 + "](" * 10000,
+    "!" * 50000,                      # CodeQL py/polynomial-redos (sentence split)
+    "! " * 25000,
+    "!a" * 30000,                     # CodeQL py/polynomial-redos (despace token)
+    "a." * 40000,
 ]
 for i, text in enumerate(adversarial):
     # CPU time, not wall time: ReDoS is a CPU cost, and wall time also

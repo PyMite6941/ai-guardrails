@@ -23,6 +23,7 @@ import json
 import os
 import sys
 import time
+import urllib.error
 import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -73,26 +74,34 @@ NOTES = {
 
 
 def fetch(dataset, split, max_rows=None):
+    """Page through the datasets-server API politely: a pause between pages,
+    and on 429/5xx honour Retry-After with exponential backoff."""
     rows, offset = [], 0
     dataset, _, config = dataset.partition("@")
     while True:
         q = urllib.parse.urlencode({"dataset": dataset, "config": config or "default", "split": split,
                                     "offset": offset, "length": 100})
-        for attempt in range(6):
+        for attempt in range(8):
             try:
                 with urlopen_http(f"{API}?{q}", timeout=60) as resp:
                     page = json.loads(resp.read())
                 break
-            except Exception:
-                if attempt == 5:
+            except urllib.error.HTTPError as exc:
+                if exc.code not in (429, 500, 502, 503, 504) or attempt == 7:
                     raise
-                time.sleep(2 ** attempt)
+                retry = exc.headers.get("Retry-After", "")
+                time.sleep(min(120, int(retry)) if retry.isdigit() else min(120, 2 ** (attempt + 1)))
+            except OSError:
+                if attempt == 7:
+                    raise
+                time.sleep(min(120, 2 ** (attempt + 1)))
         batch = [r["row"] for r in page.get("rows", [])]
         rows += batch
         offset += len(batch)
         if not batch or offset >= page.get("num_rows_total", 0) or \
                 (max_rows and offset >= max_rows):
             return rows[:max_rows] if max_rows else rows
+        time.sleep(0.5)
 
 
 def load(name):
@@ -167,7 +176,14 @@ def main():
                     help="test (default) is the holdout; study misses on train only")
     args = ap.parse_args()
     det = PromptInjectionDetector()
-    results = [evaluate(n, det, args.show_misses, args.split) for n in args.datasets]
+    results, unavailable = [], []
+    for n in args.datasets:
+        try:
+            results.append(evaluate(n, det, args.show_misses, args.split))
+        except OSError as exc:  # network / rate limit after all retries
+            unavailable.append(n)
+            print(f"WARNING: {n} unavailable ({type(exc).__name__}: {exc}); not evaluated")
+    args.datasets = [n for n in args.datasets if n not in unavailable]
     if args.json:
         with open(args.json, "w") as fh:
             json.dump(results, fh, indent=2)
@@ -188,6 +204,8 @@ def main():
                           f"{f['max_fpr_excl_override']:.1%}")
     for line in failed:
         print("GATE FAIL", line)
+    if unavailable:
+        print("NOTE: not gated (source unavailable): " + ", ".join(unavailable))
     return 1 if failed else 0
 
 
