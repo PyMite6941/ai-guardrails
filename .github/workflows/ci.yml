@@ -16,7 +16,8 @@ concurrency:
 jobs:
   tests:
     name: Tests (Python ${{ matrix.python }})
-    runs-on: ubuntu-latest
+    # 3.9 is end-of-life and missing from ubuntu-latest (26.04); keep testing it on 24.04.
+    runs-on: ${{ matrix.python == '3.9' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
