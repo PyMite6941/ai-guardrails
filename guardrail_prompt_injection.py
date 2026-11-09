@@ -1066,8 +1066,9 @@ def _try_substitution(text: str) -> str:
     if not re.search(r"[a-zA-Z]{3,}", text):
         return ""
     # Split on sentence ends and "label: " but not inside URLs/paths.
-    # (?<!...) anchors each punctuation run at its start: linear, not ReDoS.
-    pieces = re.split(r"((?<![.;!?])[.;!?]+\s+|:\s+|\n+)", text[:6000])
+    # One punctuation character followed by whitespace: no repetition, so no
+    # backtracking (CodeQL py/polynomial-redos on the earlier "[.;!?]+\s+").
+    pieces = re.split(r"([.;!?:\n](?=\s))", text[:6000])
     changed = False
     for i, seg in enumerate(pieces):
         if len(re.findall(r"[a-zA-Z]{2,}", seg)) < 3:
