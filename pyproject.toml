@@ -38,12 +38,44 @@ ai-guardrails-logging = "guardrail_logging:main"
 ai-guardrails-updates = "guardrail_updates:main"
 ai-guardrails-hardware = "guardrail_hardware:main"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["guardrail*"]
+# The code is a set of top-level modules, not a package directory, so they
+# are listed explicitly (packages.find only discovers directories). Data that
+# the modules load at runtime is installed under <prefix>/share/ai-guardrails.
+[tool.setuptools]
+py-modules = [
+    "guardrail",
+    "guardrail_assistant",
+    "guardrail_auth",
+    "guardrail_canary",
+    "guardrail_classifier",
+    "guardrail_cli",
+    "guardrail_hardware",
+    "guardrail_human_loop",
+    "guardrail_integrity",
+    "guardrail_leakage",
+    "guardrail_logging",
+    "guardrail_models",
+    "guardrail_modes",
+    "guardrail_net",
+    "guardrail_normalize",
+    "guardrail_policy_versioning",
+    "guardrail_prompt_injection",
+    "guardrail_risk",
+    "guardrail_rust_scanner",
+    "guardrail_secret_stripper",
+    "guardrail_server",
+    "guardrail_step_monitor",
+    "guardrail_testing",
+    "guardrail_textclf",
+    "guardrail_token_compressor",
+    "guardrail_updates",
+    "guardrail_users",
+    "outer_monitor",
+]
 
-[tool.setuptools.package-data]
-ai-guardrails = ["policies/**", "scripts/**", "web/**", "tmux/**", "docker/**", "rust/**"]
+[tool.setuptools.data-files]
+"share/ai-guardrails" = ["guardrail_textclf_model.json"]
+"share/ai-guardrails/policies" = ["policies/default.json"]
 
 [tool.black]
 line-length = 100

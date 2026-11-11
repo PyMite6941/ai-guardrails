@@ -33,8 +33,17 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 from guardrail_normalize import fold, leet
 
-MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          "guardrail_textclf_model.json")
+_MODEL_NAME = "guardrail_textclf_model.json"
+MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), _MODEL_NAME)
+
+
+def _model_candidates() -> List[str]:
+    """Source checkout first, then a pip install's <prefix>/share/ai-guardrails."""
+    import sys
+    paths = [MODEL_PATH, os.environ.get("GUARDRAIL_TEXTCLF_MODEL", "")]
+    for prefix in (sys.prefix, sys.base_prefix, os.path.expanduser("~/.local")):
+        paths.append(os.path.join(prefix, "share", "ai-guardrails", _MODEL_NAME))
+    return [p for p in paths if p]
 N_FEATURES = 1 << 18
 MAX_CHARS = 4000            # long inputs: score head and tail windows
 _WORD = re.compile(r"[a-z0-9']+|[^\sa-z0-9]")
@@ -136,9 +145,13 @@ def get_model() -> Optional[TextClassifier]:
     """The shipped model, or None if absent (the rules still run)."""
     global _MODEL, _LOAD_FAILED
     if _MODEL is None and not _LOAD_FAILED:
-        try:
-            _MODEL = TextClassifier.load()
-        except (OSError, ValueError, KeyError):
+        for path in _model_candidates():
+            try:
+                _MODEL = TextClassifier.load(path)
+                break
+            except (OSError, ValueError, KeyError):
+                continue
+        else:
             _LOAD_FAILED = True
     return _MODEL
 
