@@ -948,6 +948,33 @@ def skeleton(folded: str) -> str:
 
 _COMPILED_SECRETS = [(p, re.compile(p)) for p in SECRET_PATTERNS]
 
+# The generic high-entropy pattern also matches chess FEN boards
+# ("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR" is 43 [a-z0-9/] chars), which
+# blocked chess questions (reported by the Clyde project: 69% of real chess
+# prompts). A match is exempt only if it is *exactly* a FEN board: 8 ranks of
+# piece letters and digits, each summing to 8 squares. That grammar cannot
+# carry an arbitrary secret, and every other secret pattern still applies.
+_GENERIC_SECRET = r"\b(?=[a-z0-9/+]*[a-z])(?=[a-z0-9/+]*[0-9])[a-z0-9/+]{40,}"
+_FEN_RANK = re.compile(r"[pnbrqk1-8]{1,8}")
+
+
+def _is_fen_board(s: str) -> bool:
+    ranks = s.lower().split("/")
+    if len(ranks) != 8:
+        return False
+    for rank in ranks:
+        if not _FEN_RANK.fullmatch(rank):
+            return False
+        if sum(int(c) if c.isdigit() else 1 for c in rank) != 8:
+            return False
+    return True
+
+
+def _secret_hit(pat: str, rx, text: str) -> bool:
+    if pat == _GENERIC_SECRET:
+        return any(not _is_fen_board(m.group(0)) for m in rx.finditer(text))
+    return bool(rx.search(text))
+
 # Backwards-compatible names (older code imported these lists).
 JAILBREAK_PATTERNS = [r[0] for r in RULES]
 JAILBREAK_KEYWORDS: List[str] = []
@@ -1249,7 +1276,7 @@ class PromptInjectionDetector:
         if include_secrets:
             lowered = [views["lines"][0].lower()] + views["lines"][1:2]
             for pat, rx in _COMPILED_SECRETS:
-                if any(rx.search(v) for v in lowered):
+                if any(_secret_hit(pat, rx, v) for v in lowered):
                     findings.append({"rule": "secret.pattern", "category": "secret",
                                      "severity": "high", "match": pat})
                     break

@@ -356,6 +356,21 @@ ok, _, reason = engine._check_prompt_injection("anything", pol)
 guardrail._pi_scan = _saved
 check("missing detector fails closed", ok is False, reason)
 
+# ── chess FEN boards are not secrets; real secrets still are ─────────────────
+_d = PromptInjectionDetector()
+for fen in ["rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4",
+            "3r2k1/p1R3pp/1p2ppq1/8/3PbP2/1P4QP/P4BP1/6K1 b - - 3 37"]:
+    r = _d.analyze(f"Is Nf3 legal in this position: {fen}?")
+    check(f"FEN not flagged as a secret: {fen[:24]}", r["safe"], r["findings"])
+for text in ["key: rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR/a8f3k2j4h5l6",  # 9 ranks
+             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNX9z",                    # bad rank
+             "token ab12cd34ef56ab78cd90ef12ab34cd56ef78ab90cd12",                 # plain hex
+             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR sk-proj-abcdefghijklmnop1234"]:
+    r = _d.analyze(text)
+    check(f"secret still flagged next to/inside FEN-like text: {text[:30]}", not r["safe"], r["findings"])
+
+
 print()
 if FAILS:
     print(f"{len(FAILS)} FAILURE(S):")
