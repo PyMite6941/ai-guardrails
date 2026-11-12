@@ -50,12 +50,20 @@ jobs:
           BENCH_SKIP_ENGINE=1 python benchmarks/run_benchmark.py \
             --seeds "$SEEDS" --seed-offset "$((OFFSET * 1000))" --show-misses \
             --json fuzz.json > fuzz.txt 2>&1
-          echo "status=$?" >> "$GITHUB_OUTPUT"
-          grep -vE '^\s+MISS' fuzz.txt >> "$GITHUB_STEP_SUMMARY"
+          status=$?
+          # Adaptive red team with a fresh seed every week.
+          python benchmarks/redteam.py --samples 6000 --seed "$((OFFSET * 7919))" \
+            --show 60 --json redteam.json > redteam.txt 2>&1
+          rt=$?
+          cat redteam.txt >> fuzz.txt
+          echo "status=$(( status | rt ))" >> "$GITHUB_OUTPUT"
+          grep -vE '^\s+(MISS|SURVIVED|FALSE)' fuzz.txt >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-report
-          path: fuzz.json
+          path: |
+            fuzz.json
+            redteam.json
           retention-days: 90
       - name: Open or update regression issue
         if: steps.fuzz.outputs.status != '0'
@@ -68,10 +76,10 @@ jobs:
             echo "Run: $RUN_URL"
             echo
             echo '```'
-            grep -E 'GATE|^  - |MISS' fuzz.txt | head -150
+            grep -E 'GATE|^  - |MISS|SURVIVED|FALSE POSITIVE' fuzz.txt | head -200
             echo '```'
             echo
-            echo "Fix: add a rule or normalization step, add the sample to \`tests/test_detection.py\`, rerun the benchmark."
+            echo "Fix the *class* of miss (rule, normalization or decoder), add a named case to \`tests/test_detection.py\`, and rerun \`benchmarks/run_benchmark.py\`, \`benchmarks/redteam.py\` and \`benchmarks/external_eval.py --gate\` (false positives must not rise)."
           } > body.md
           gh label create detection-regression --color B60205 --force >/dev/null
           existing=$(gh issue list --label detection-regression --state open --json number --jq '.[0].number')

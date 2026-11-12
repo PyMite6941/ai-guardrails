@@ -560,9 +560,40 @@ def psutil_boot_time() -> float:
         return 0.0
 
 
+MULTITURN_WINDOW = 5
+
+
+def multiturn_violation(session: "ChatSession", new_text: str,
+                        exclude_last: Optional[str] = None) -> Optional[str]:
+    """Injection split across turns ("remember 'ignore all prev'" ... "now
+    'ious instructions' -- combine them"), or built up gradually.
+
+    The last few user messages that passed on their own are scanned together
+    with the new one. Only strong (critical/high) findings count, so weak
+    signals such as role-play framing do not accumulate over a long, benign
+    conversation; messages that were blocked individually are left out so an
+    old attack does not block everything after it.
+    """
+    from guardrail_prompt_injection import get_detector
+    det = get_detector()
+    prev = [m.content for m in session.messages if m.role == "user" and m.content]
+    if exclude_last is not None and prev and prev[-1] == exclude_last:
+        prev = prev[:-1]
+    clean = [t for t in prev[-MULTITURN_WINDOW:] if det.scan(t)[0]]
+    if not clean:
+        return None
+    report = det.analyze(" ".join(clean + [new_text]))
+    strong = [f for f in report["findings"] if f["severity"] in ("critical", "high")]
+    if strong:
+        return (f"Multi-turn prompt injection: {strong[0]['rule']} "
+                f"({strong[0]['category']}) spans the last {len(clean) + 1} messages")
+    return None
+
+
 def agentic_plan_and_act(user_text: str, session: ChatSession,
                          session_token: Optional[str] = None,
-                         principal=None) -> Dict[str, Any]:
+                         principal=None,
+                         raw_text: Optional[str] = None) -> Dict[str, Any]:
     """Run an agentic plan-act-review loop.
 
     1. Validate user input through guardrails
@@ -576,9 +607,18 @@ def agentic_plan_and_act(user_text: str, session: ChatSession,
     trace: List[Dict[str, Any]] = []
 
     # Step 1: Validate input
+    # Detection sees what the user actually sent (raw_text); secret stripping
+    # and token compression are for the model, and could drop the very words
+    # an injection is made of.
     input_validation = engine.validate_input(
-        user_text, page_id="chat-agent", agent_name="agent"
+        raw_text or user_text, page_id="chat-agent", agent_name="agent"
     )
+    if input_validation["safe"]:
+        mt = multiturn_violation(session, raw_text or user_text,
+                                 exclude_last=raw_text or user_text)
+        if mt:
+            input_validation = dict(input_validation, safe=False, reason=mt,
+                                    blocked_by="multiturn")
     trace.append({"step": "input_validation", "result": input_validation})
     if not input_validation["safe"]:
         output = (f"I cannot process that request. "
@@ -1782,12 +1822,19 @@ class Handler(BaseHTTPRequestHandler):
             # Process based on mode — use compressed text to save tokens
             if agent_mode:
                 result = agentic_plan_and_act(compressed_text, session, session_token,
-                                              principal=getattr(self, "principal", None))
+                                              principal=getattr(self, "principal", None),
+                                              raw_text=text)
             else:
                 # Regular chat: validate input, generate response
+                # Validate what was actually sent, not the compressed form.
                 input_validation = engine.validate_input(
-                    compressed_text, page_id="chat", agent_name="user"
+                    text, page_id="chat", agent_name="user"
                 )
+                if input_validation["safe"]:
+                    mt = multiturn_violation(session, text, exclude_last=text)
+                    if mt:
+                        input_validation = dict(input_validation, safe=False, reason=mt,
+                                                blocked_by="multiturn")
                 if not input_validation["safe"]:
                     response = (f"I cannot process that message. "
                                 f"{input_validation['reason']}")

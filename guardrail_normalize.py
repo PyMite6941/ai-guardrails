@@ -200,7 +200,50 @@ _CONFUSABLES = {
     "․": ".", "‧": ".", "∙": ".", "·": ".",
     "ⅰ": "i", "ⅼ": "l",
 }
+
+
+def _letterlike_from_names() -> Dict[str, str]:
+    """Letters that NFKC leaves alone but that read as a Latin letter.
+
+    Generated from Unicode names so whole families are covered, not a
+    hand-picked few: small capitals (ɪɢɴᴏʀᴇ, the "small caps" font trick),
+    turned/reversed/script/dotless forms (upside-down text), and the
+    regional-indicator letters 🇦-🇿 (text written as "flags").
+    """
+    out: Dict[str, str] = {}
+    pattern = re.compile(r"^LATIN (?:SMALL |CAPITAL )?LETTER (?:SMALL CAPITAL |TURNED |REVERSED |"
+                         r"SCRIPT |DOTLESS |CLOSED |OPEN |SIDEWAYS |INVERTED |BARRED |STROKE )*([A-Z])$")
+    for start, end in ((0x0180, 0x0250), (0x0250, 0x02B0), (0x1D00, 0x1D80), (0xA720, 0xA800),
+                       (0x1DF00, 0x1E000)):
+        for cp in range(start, end):
+            m = pattern.match(unicodedata.name(chr(cp), ""))
+            if m:
+                out[chr(cp)] = m.group(1).lower()
+    for i in range(26):
+        out[chr(0x1F1E6 + i)] = chr(97 + i)  # regional indicators
+    return out
+
+
+for _ch, _latin in _letterlike_from_names().items():
+    _CONFUSABLES.setdefault(_ch, _latin)
 _CONFUSABLE_TABLE = str.maketrans(_CONFUSABLES)
+
+# Upside-down text ("ǝɹouƃᴉ"): reversed order and turned letters, where some
+# turned letters are ordinary ASCII (u = n, p = d, q = b). Only decoded when
+# the text clearly is upside-down, so ordinary "up" never becomes "dn".
+_UPSIDE = {"ɐ": "a", "q": "b", "ɔ": "c", "p": "d", "ǝ": "e", "ɟ": "f", "ƃ": "g", "ɥ": "h",
+           "ᴉ": "i", "ı": "i", "ɾ": "j", "ʞ": "k", "ɯ": "m", "u": "n", "d": "p", "b": "q",
+           "ɹ": "r", "ʇ": "t", "n": "u", "ʌ": "v", "ʍ": "w", "ʎ": "y", "˙": ".", "¿": "?",
+           "¡": "!", "'": ",", ",": "'"}
+_UPSIDE_TABLE = str.maketrans(_UPSIDE)
+_UPSIDE_MARKERS = frozenset("ɐɔǝɟƃɥᴉɾʞɯɹʇʌʍʎ")
+
+
+def upside_down(text: str) -> str:
+    """Decode upside-down text; "" unless >= 3 turned letters are present."""
+    if not text or text.isascii() or sum(c in _UPSIDE_MARKERS for c in text) < 3:
+        return ""
+    return text[::-1].translate(_UPSIDE_TABLE)
 
 _LEET = str.maketrans({
     "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t", "8": "b",
@@ -231,24 +274,33 @@ def _collapse_ws(text: str) -> str:
     return " ".join(text.split())
 
 
+# Letter forms whose NFKC decomposition inserts punctuation: parenthesized
+# "⒜" -> "(a)" would turn every letter into its own bracketed token. Map them
+# to the bare letter before NFKC (the meaning is unchanged).
+_PRE_NFKC = str.maketrans({chr(0x249C + i): chr(97 + i) for i in range(26)})
+
+
 def canonicalize(text: str) -> str:
     """Model-safe canonical form: invisibles stripped, NFKC, spaces collapsed."""
     if not text:
         return text or ""
-    text = strip_invisible(text)
+    text = strip_invisible(text).translate(_PRE_NFKC)
     text = unicodedata.normalize("NFKC", text)
     return _collapse_ws(text)
 
 
+
+
 def fold(text: str) -> str:
     """Lowercase, diacritic-free, homoglyph-folded form (detection only)."""
-    text = canonicalize(text).casefold()
+    text = canonicalize(text.translate(_PRE_NFKC)).casefold()
     text = _strip_marks(text)
     return text.translate(_CONFUSABLE_TABLE)
 
 
 def fold_lines(text: str) -> str:
     """Like fold() but keeps line breaks, for line-anchored syntax rules."""
+    text = text.translate(_PRE_NFKC)
     if not text:
         return ""
     text = unicodedata.normalize("NFKC", strip_invisible(text)).casefold()
@@ -273,7 +325,9 @@ def squash(text: str) -> str:
 # extra sources, never instead of the original text.
 
 _SEPARATORS = frozenset(".-_·•*~+|/\\")
-_SEP_TOKEN = re.compile(r"(?<!\S)(\S)((?:[.\-_·•*~+|/\\]\S){2,})(?=\s|$)")
+# Any one repeated non-word, non-space character can separate letters:
+# "b-a-s-h", "c🙂a🙂l🙂l", "r♦u♦n".
+_SEP_TOKEN = re.compile(r"(?<!\S)(\S)((?:(?:[^\w\s]|_)\S){1,150})(?=\s|$)")  # bounded: no ReDoS
 
 # Words that carry no instruction content: intensifiers, hedges, politeness
 # and discourse markers. Deliberately broad and generic rather than tuned to
@@ -318,14 +372,26 @@ def despace(text: str) -> str:
     run: List[str] = []
 
     def _flush():
-        if len(run) >= 3:
-            seps = run[1::2]
-            if len(set(seps)) == 1 and seps[0] in _SEPARATORS:
-                joined.append("".join(run[0::2]))
-            else:
-                joined.append("".join(run))
-        else:
+        if len(run) < 3:
             joined.extend(run)
+        elif sum(not c.isalnum() for c in run) * 10 >= len(run) * 3:
+            # "b . a . s . h f . o . o": separators join letters into a word;
+            # two letters side by side, or a doubled separator, mark a word
+            # boundary.
+            word = run[0] if run[0].isalnum() else ""
+            seps = 0
+            for prev, cur in zip(run, run[1:]):
+                if cur.isalnum():
+                    if (prev.isalnum() or seps >= 2) and word:
+                        joined.append(word)
+                        word = ""
+                    word += cur
+                    seps = 0
+                else:
+                    seps += 1
+            joined.append(word)
+        else:
+            joined.append("".join(run))  # "b a s h": no boundary information
         run.clear()
 
     for tok in tokens:
@@ -380,7 +446,7 @@ def drop_foreign_words(text: str) -> str:
 
 def native_lower(text: str) -> str:
     """Canonical, lowercased, marks stripped, scripts left as they are."""
-    return _strip_marks(canonicalize(text)).lower()
+    return _strip_marks(canonicalize(text.translate(_PRE_NFKC))).lower()
 
 
 def detection_views(text: str) -> Dict[str, str]:

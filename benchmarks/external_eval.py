@@ -23,6 +23,7 @@ import json
 import os
 import sys
 import time
+import urllib.error
 import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -42,38 +43,65 @@ DATASETS = {
     # Benign only: real human-written instructions, the false-positive check.
     "dolly": ("databricks/databricks-dolly-15k", ["train"], "instruction",
               lambda r: False),
+    # Real people attacking Lakera's Gandalf game to make it leak a password:
+    # adaptive human override / extraction attempts. All rows are attacks.
+    "gandalf": ("Lakera/gandalf_ignore_instructions", ["train", "validation", "test"], "text",
+                lambda r: True),
+    # Injections hidden inside text the model was asked to summarize (indirect).
+    "gandalf_summ": ("Lakera/gandalf_summarization", ["train", "validation", "test"], "text",
+                     lambda r: True),
+    # Jailbreaks collected in the wild (Discord, Reddit, websites; Shen et al., CCS 2024).
+    "wild_jailbreak": ("TrustAIRLab/in-the-wild-jailbreak-prompts@jailbreak_2023_12_25",
+                       ["train"], "prompt", lambda r: True),
+    # Ordinary prompts from the same communities: the hardest realistic FP test
+    # (persona and prompt-engineering requests that are not jailbreaks).
+    "wild_regular": ("TrustAIRLab/in-the-wild-jailbreak-prompts@regular_2023_12_25",
+                     ["train"], "prompt", lambda r: False),
 }
-MAX_ROWS = {"dolly": 2000}
+MAX_ROWS = {"dolly": 2000, "wild_regular": 3000}
 # Datasets with a single split: alternate rows into pseudo train/test halves.
-PSEUDO_SPLIT = {"dolly"}
+PSEUDO_SPLIT = {"dolly", "wild_jailbreak", "wild_regular"}
 NOTES = {
     "deepset": "Apache-2.0. Labels are broad: role-play requests and some plain tasks "
                "('Generate SQL code') are labelled injection; ~half the rows are German.",
     "jackhhao": "Apache-2.0. Jailbreak vs benign prompts, many long role-play jailbreaks.",
     "dolly": "CC-BY-SA-3.0. First 2000 human-written instructions; all benign (FPR only).",
+    "gandalf": "MIT. Real human attempts to make Gandalf ignore instructions / leak a password.",
+    "gandalf_summ": "MIT. Injections embedded in text given to a summarizer (indirect).",
+    "wild_jailbreak": "MIT. In-the-wild jailbreak prompts (Shen et al., CCS 2024).",
+    "wild_regular": "MIT. First 3000 regular prompts from the same communities (FPR only).",
 }
 
 
 def fetch(dataset, split, max_rows=None):
+    """Page through the datasets-server API politely: a pause between pages,
+    and on 429/5xx honour Retry-After with exponential backoff."""
     rows, offset = [], 0
+    dataset, _, config = dataset.partition("@")
     while True:
-        q = urllib.parse.urlencode({"dataset": dataset, "config": "default", "split": split,
+        q = urllib.parse.urlencode({"dataset": dataset, "config": config or "default", "split": split,
                                     "offset": offset, "length": 100})
-        for attempt in range(4):
+        for attempt in range(8):
             try:
                 with urlopen_http(f"{API}?{q}", timeout=60) as resp:
                     page = json.loads(resp.read())
                 break
-            except Exception:
-                if attempt == 3:
+            except urllib.error.HTTPError as exc:
+                if exc.code not in (429, 500, 502, 503, 504) or attempt == 7:
                     raise
-                time.sleep(2 ** attempt)
+                retry = exc.headers.get("Retry-After", "")
+                time.sleep(min(120, int(retry)) if retry.isdigit() else min(120, 2 ** (attempt + 1)))
+            except OSError:
+                if attempt == 7:
+                    raise
+                time.sleep(min(120, 2 ** (attempt + 1)))
         batch = [r["row"] for r in page.get("rows", [])]
         rows += batch
         offset += len(batch)
         if not batch or offset >= page.get("num_rows_total", 0) or \
                 (max_rows and offset >= max_rows):
             return rows[:max_rows] if max_rows else rows
+        time.sleep(0.5)
 
 
 def load(name):
@@ -118,6 +146,15 @@ def evaluate(name, det, show, split):
           f"TPR {res['tpr']:.1%}  FPR {res['fpr']:.1%}  precision {res['precision']:.1%}  "
           f"({dt:.1f}s)")
     print(f"   {NOTES[name]}")
+    if false_alarms and name == "wild_regular":
+        # Transparency: how many false alarms are explicit override boilerplate
+        # ("ignore all previous instructions ..."), which this detector flags by
+        # design because, for an injection guardrail, that is an override.
+        explicit = sum(1 for rid, _ in false_alarms if rid and rid.startswith("override."))
+        rest = len(false_alarms) - explicit
+        res["fpr_excluding_explicit_override"] = rest / max(fp + tn - explicit, 1)
+        print(f"   of {len(false_alarms)} false alarms, {explicit} are explicit instruction "
+              f"overrides; FPR on the rest {res['fpr_excluding_explicit_override']:.1%}")
     if split == "test" and show:
         print("   (misses are not shown for the test split: it is the holdout)")
         show = 0
@@ -139,7 +176,14 @@ def main():
                     help="test (default) is the holdout; study misses on train only")
     args = ap.parse_args()
     det = PromptInjectionDetector()
-    results = [evaluate(n, det, args.show_misses, args.split) for n in args.datasets]
+    results, unavailable = [], []
+    for n in args.datasets:
+        try:
+            results.append(evaluate(n, det, args.show_misses, args.split))
+        except OSError as exc:  # network / rate limit after all retries
+            unavailable.append(n)
+            print(f"WARNING: {n} unavailable ({type(exc).__name__}: {exc}); not evaluated")
+    args.datasets = [n for n in args.datasets if n not in unavailable]
     if args.json:
         with open(args.json, "w") as fh:
             json.dump(results, fh, indent=2)
@@ -154,8 +198,14 @@ def main():
             failed.append(f"{name}: TPR {res['tpr']:.1%} < {f['min_tpr']:.0%}")
         if res["split"] == "test" and res["fpr"] > f.get("max_fpr", 1):
             failed.append(f"{name}: FPR {res['fpr']:.1%} > {f['max_fpr']:.1%}")
+        excl = res.get("fpr_excluding_explicit_override")
+        if res["split"] == "test" and excl is not None and excl > f.get("max_fpr_excl_override", 1):
+            failed.append(f"{name}: FPR excluding explicit overrides {excl:.1%} > "
+                          f"{f['max_fpr_excl_override']:.1%}")
     for line in failed:
         print("GATE FAIL", line)
+    if unavailable:
+        print("NOTE: not gated (source unavailable): " + ", ".join(unavailable))
     return 1 if failed else 0
 
 

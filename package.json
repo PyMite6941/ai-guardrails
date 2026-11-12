@@ -66,6 +66,8 @@
     "docker/",
     "tmux/",
     "guardrail_normalize.py",
+    "guardrail_textclf_model.json",
+    "guardrail_textclf.py",
     "guardrail_net.py",
     "tests/test_detection.py",
     "tests/test_server_security.py",

@@ -535,7 +535,7 @@ python3 benchmarks/run_benchmark.py --show-misses  # list what got through
 | detector | detection | false positives |
 |---|---|---|
 | prompt-injection layer, before this release | 30.5% | 22.9% |
-| prompt-injection layer, now | 98.9% | 0.0% |
+| prompt-injection layer, now | 99.8% | 0.0% |
 | full input pipeline, default policy 1.0 | 99.3% | 18.1% (bare words: root, escape, dig, nc, curl) |
 | full input pipeline, default policy 1.1 | 99.1% | 0.0% (attack-shaped phrases; 0 of 2,000 dolly instructions blocked) |
 
@@ -544,35 +544,74 @@ between trigger words, and Latin words inserted into non-Latin text. The
 `filler_novel` mutator inserts words the detector has never seen (88%); that
 is the honest number for arbitrary insertion.
 
-### Holdout: independently labelled datasets
+### Red team: an adaptive attacker
 
-The corpus above was written alongside the rules, so it flatters them.
-`benchmarks/external_eval.py` scores the detector on public datasets labelled
-by other people. Misses are studied on the **train** splits only; the
-**test** splits are never read row by row and are the numbers that count.
+`benchmarks/redteam.py` attacks the detector the way jailbreakers do. It
+takes six attack intents, phrases each many ways, wraps them in 17
+published techniques (prefix injection, refusal suppression, DeepInception
+nesting, payload splitting, many-shot dialogue, fake reasoning, fake tool
+output, authority claims, legal-clause injection, CipherChat ciphers,
+translation, symbol interleaving, ...), and optionally stacks character-level
+evasions (homoglyphs, zero-width, small caps, regional-indicator letters,
+upside-down text, inserted nonsense words, ...). Harmless payloads go
+through the same wrappers to measure false positives.
 
 ```
-python3 benchmarks/external_eval.py                          # holdout numbers
+python3 benchmarks/redteam.py --samples 3000 --seed 7 --show 20
+```
+
+Attack success rate went from 29.8% to ~0% with 0% wrapper false positives.
+That number is partly in-distribution (the classifier trained on other seeds
+of the same generator); the independent datasets below are the honest test.
+A fresh seed runs every week and opens an issue on regression.
+
+### Holdout: independently labelled datasets
+
+`benchmarks/external_eval.py` scores the detector on public data labelled by
+other people. Misses are studied on **train** splits only; **test** splits
+are never read row by row and are the numbers that count.
+
+```
+python3 benchmarks/external_eval.py --gate                     # holdout numbers + CI floors
 python3 benchmarks/external_eval.py --split train --show-misses 20
 ```
 
-| dataset (test split) | attacks caught | false positives |
-|---|---|---|
-| [jackhhao/jailbreak-classification](https://huggingface.co/datasets/jackhhao/jailbreak-classification), before | 54.0% | 0.8% |
-| jackhhao/jailbreak-classification, now | 76.3% | 0.8% |
-| [deepset/prompt-injections](https://huggingface.co/datasets/deepset/prompt-injections), before | 3.3% | 0.0% |
-| deepset/prompt-injections, now | 15.0% | 0.0% |
-| [databricks-dolly-15k](https://huggingface.co/datasets/databricks/databricks-dolly-15k) (1,000 benign instructions) | n/a | 0.0% |
+| dataset (test split) | attacks caught: first measured | now | false positives now |
+|---|---|---|---|
+| [Lakera/gandalf_ignore_instructions](https://huggingface.co/datasets/Lakera/gandalf_ignore_instructions) (real people attacking an LLM) | 67.9% | 76.8% | n/a |
+| [TrustAIRLab in-the-wild jailbreaks](https://huggingface.co/datasets/TrustAIRLab/in-the-wild-jailbreak-prompts) (Discord, Reddit, sites) | 58.8% | 63.8% | n/a |
+| [jackhhao/jailbreak-classification](https://huggingface.co/datasets/jackhhao/jailbreak-classification) | 54.0% | 77.7% | 0.8% |
+| [deepset/prompt-injections](https://huggingface.co/datasets/deepset/prompt-injections) | 3.3% | 18.3% | 0.0% |
+| [Lakera/gandalf_summarization](https://huggingface.co/datasets/Lakera/gandalf_summarization) (13 rows, indirect) | 0.0% | 23.1% | n/a |
+| [databricks-dolly-15k](https://huggingface.co/datasets/databricks/databricks-dolly-15k) (1,000 everyday instructions) | n/a | n/a | 0.0% |
+| TrustAIRLab in-the-wild *regular* prompts | n/a | n/a | 20.7%, of which 254/311 contain "ignore all previous instructions"; 4.6% on the rest |
 
-Read the deepset number with its labels in mind: it counts topic hijacking of
-a news bot ("You are Volkswagen. What do you think of Mercedes?") and plain
-role-play as injection. A context-free text detector cannot and should not
-block those for every application. Pair this layer with the model classifier
-(`guardrail_classifier.py`) and per-page policies for that class.
+How to read these:
 
-Scoring: critical/high findings block alone; medium findings (role-play
-framing, "forget everything", a vendor's content policy named) are weak
-signals that block only in combination, so ordinary role-play requests pass.
+- **"Regular" in-the-wild prompts are not clean benign data for an injection
+  detector.** Most of the flagged ones open with prompt-template boilerplate
+  ("Please ignore all previous instructions. I want you to act as..."). For
+  an injection guardrail that is an instruction override, so it is blocked
+  by design; the gated number is the 4.6% on the rest.
+- **deepset** counts topic hijacking of a news bot ("You are Volkswagen.
+  What do you think of Mercedes?") as injection. A context-free detector
+  cannot and should not block that for every application.
+- **Recall on real attacks is 64-78%, not 100%.** Every round of new
+  hand-written attacks found phrasings earlier rounds had missed. Pattern
+  rules and an n-gram classifier can be paraphrased around; keep the
+  model-based classifier, least-privilege tools and the output-side checks
+  enabled behind this layer.
+
+### How detection works
+
+Many normalized views of each input (folding, decoding, de-spacing, a
+"skeleton" that drops inserted words, a multilingual concept view), concept
+rules over those views, and a stdlib-only learned classifier
+(`guardrail_textclf.py`, trained on train splits only by
+`benchmarks/train_classifier.py`). Findings are scored: critical/high block
+alone; medium and low signals (jailbreak scaffolding, persona set-up,
+classifier at moderate confidence) block only in combination, and correlated
+signals count once. Details in [docs/security.md](docs/security.md).
 
 CI fails if any number drops below `benchmarks/thresholds.json`. The thresholds
 only move up.

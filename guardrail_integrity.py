@@ -40,6 +40,17 @@ DEFAULT_WATCHLIST = [
     "outer_monitor.py",
     "guardrail_modes.py",
     "guardrail_risk.py",
+    # Detection layer: tampering here silently disables the guardrails.
+    "guardrail_prompt_injection.py",
+    "guardrail_normalize.py",
+    "guardrail_leakage.py",
+    "guardrail_textclf.py",
+    "guardrail_textclf_model.json",
+    "guardrail_secret_stripper.py",
+    # Authentication / authorisation and outbound network policy.
+    "guardrail_auth.py",
+    "guardrail_users.py",
+    "guardrail_net.py",
     "policies/default.json",
     "scripts/kill-switch.sh",
 ]

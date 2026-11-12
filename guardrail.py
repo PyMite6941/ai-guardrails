@@ -23,6 +23,7 @@ import json
 import re
 import uuid
 import hashlib
+import threading
 import unicodedata
 import subprocess
 from datetime import datetime
@@ -175,6 +176,9 @@ ZERO_WIDTH_CHARS = [
 # match users talking about the topic ("what is a system prompt?"); extraction
 # attempts in input are caught in context by the prompt_injection check.
 OUTPUT_ONLY_CHECKS = {"disclaimers", "system_prompt_leakage"}
+
+# Per-request state for the threaded server (raw input for the detectors).
+_REQUEST = threading.local()
 
 DEFAULT_POLICY: Dict[str, Any] = {
     "name": "default",
@@ -544,6 +548,9 @@ class GuardrailEngine:
             # Fail closed: a missing detector must never wave input through.
             return False, "", "Prompt injection detector unavailable (fail-closed)"
         safe, reason, matched = _pi_scan(text)
+        raw = getattr(_REQUEST, "raw_input", None)
+        if safe and raw and raw != text:
+            safe, reason, matched = _pi_scan(raw)
         if not safe:
             return False, "", reason
         return True, text, "Prompt injection scan passed"
@@ -674,6 +681,10 @@ class GuardrailEngine:
         }
         policy = self.get_policy(page_id)
         current = user_input
+        # Detection checks also scan the raw input: earlier sanitizing steps
+        # (canonicalize, secret stripping) must never hide what the attacker
+        # actually sent from the detectors. Per-thread: the server is threaded.
+        _REQUEST.raw_input = user_input
         # Run the cheap length check before the expensive scanners so an
         # oversized input cannot be used to burn CPU (resource exhaustion,
         # OWASP LLM10 "Unbounded Consumption").
